@@ -9,7 +9,7 @@ const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
 const MAX_RESULT_BYTES = 20 * 1024 * 1024;
 const MAX_POLLS_PER_RESULT = 140;
 const MAX_LOOK_POLLS = 36;
-const MAX_BATCH_POLLS = 80;
+const MAX_MANIFEST_BYTES = 8 * 1024;
 const UPLOAD_PREFIX = "temporary/lv-virtual-try-on";
 const RESULT_PREFIX = "temporary/lv-virtual-try-on-results";
 const LOCAL_ORIGIN_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
@@ -136,7 +136,7 @@ export class TryOnWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowParams> 
 }
 
 export class TryOnBatchWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowParams> {
-  async run(event: WorkflowEvent<TryOnWorkflowParams>, step: WorkflowStep): Promise<TryOnWorkflowOutput> {
+  async run(event: WorkflowEvent<TryOnWorkflowParams>, step: WorkflowStep): Promise<TryOnBatchWorkflowOutput> {
     const params = event.payload;
     const childIds = params.generations.map((_, index) => `${event.instanceId}-look-${index + 1}`);
     try {
@@ -152,55 +152,20 @@ export class TryOnBatchWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowPar
         return { childIds };
       });
 
-      const results: Array<StoredResult | undefined> = new Array(childIds.length);
-      const finished = new Array(childIds.length).fill(false) as boolean[];
-      let failedCount = 0;
-      for (let pollIndex = 0; pollIndex < MAX_BATCH_POLLS && finished.some((value) => !value); pollIndex += 1) {
-        await step.sleep(`wait for look workflows round ${pollIndex + 1}`, "10 seconds");
-        for (const [resultIndex, childId] of childIds.entries()) {
-          if (finished[resultIndex]) continue;
-          const status = await step.do(`check look workflow ${resultIndex + 1}-${pollIndex + 1}`, {
-            retries: { limit: 0, delay: "1 second", backoff: "constant" },
-            timeout: "1 minute"
-          }, async (): Promise<LookStatusSnapshot> => {
-            try {
-              const observed = await (await this.env.TRY_ON_LOOK_WORKFLOW.get(childId)).status();
-              return { output: parseLookWorkflowOutput(observed.output), status: observed.status };
-            } catch {
-              return { output: null, status: "unknown" };
-            }
-          });
-          if (["queued", "running", "waiting", "waitingForPause", "paused", "unknown"].includes(status.status)) continue;
-          finished[resultIndex] = true;
-          if (status.status !== "complete") {
-            failedCount += 1;
-            continue;
-          }
-          const output = status.output;
-          if (!output || output.status === "failed") {
-            failedCount += 1;
-            continue;
-          }
-          results[resultIndex] = output.result;
-        }
-      }
-      failedCount += finished.filter((value) => !value).length;
-
-      await step.do("remove completed source images", {
+      // Child workflows own generation. The HTTP status endpoint aggregates their
+      // outputs directly; this parent only keeps source references alive long enough
+      // for queued children, then performs privacy cleanup.
+      await step.sleep("keep source images available for child workflows", "20 minutes");
+      await step.do("remove source images after child window", {
         retries: { limit: 4, delay: "3 seconds", backoff: "exponential" },
         timeout: "2 minutes"
       }, async () => deleteTemporaryImages(this.env, params.storagePrefix, params.extensions));
-      const completedResults = results.filter((result): result is StoredResult => Boolean(result));
       console.log(JSON.stringify({
-        event: "try_on_batch_completed",
-        failedCount,
-        resultCount: completedResults.length,
+        event: "try_on_batch_delegated",
+        childCount: childIds.length,
         workflowId: event.instanceId
       }));
-      if (!completedResults.length) {
-        return { message: "这组图片没能生成结果，请换用更清晰、无遮挡的照片再试", status: "failed" };
-      }
-      return { failedCount, mode: params.mode, results: completedResults, status: "succeeded" };
+      return { childCount: childIds.length, status: "delegated" };
     } catch (error) {
       // Already-started child workflows may still need the references. The bucket lifecycle
       // policy remains the cleanup fallback if batch orchestration is interrupted.
@@ -209,7 +174,7 @@ export class TryOnBatchWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowPar
         event: "try_on_batch_failed",
         workflowId: event.instanceId
       }));
-      return { message: "后台任务暂时中断，请稍后再试", status: "failed" };
+      return { message: "后台任务暂时中断，请稍后重新提交", status: "failed" };
     }
   }
 }
@@ -349,6 +314,7 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
           references: [references[0], references[index + 1], ...(poseReferenceItem ? [poseReferenceItem] : [])]
         }))
       : [{ prompt: buildLayeredPrompt(garmentFiles.length, direction, poseMode), references }];
+    await putJobManifest(env, jobId, { childCount: generations.length, mode, version: 2 });
     await env.TRY_ON_BATCH_WORKFLOW.create({
       id: jobId,
       params: {
@@ -362,13 +328,26 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
     });
     return json({ background: true, jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
   } catch (error) {
+    // A create response can be lost after Cloudflare accepted the workflow. Preserve
+    // its inputs and return the same job instead of risking a duplicate paid submit.
+    if (await workflowExists(env.TRY_ON_BATCH_WORKFLOW, jobId)) {
+      return json({ background: true, jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
+    }
     if (uploadedCount > 0) await deleteTemporaryImages(env, storagePrefix, extensions.slice(0, uploadedCount));
+    await deleteJobManifest(env, jobId);
     throw error;
   }
 }
 
 async function getTryOnJob(jobId: string, env: Env, cors: Headers): Promise<Response> {
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
+  const childJob = await getChildJobStatus(env, jobId);
+  if (childJob.state === "processing") {
+    return json({ background: true, jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
+  }
+  if (childJob.state === "failed") return json({ error: childJob.message }, 502, cors);
+  if (childJob.state === "succeeded") return jobSucceededResponse(jobId, childJob.output, cors);
+
   let workflowStatus: InstanceStatus;
   try {
     workflowStatus = await getJobWorkflowStatus(env, jobId);
@@ -387,17 +366,16 @@ async function getTryOnJob(jobId: string, env: Env, cors: Headers): Promise<Resp
     return json({ error: output?.message || "后台任务未能完成，请重新提交" }, 502, cors);
   }
 
-  return json({
-    failedCount: output.failedCount,
-    mode: output.mode,
-    resultCount: output.results.length,
-    results: output.results.map((_, index) => ({ url: `/api/try-on/jobs/${jobId}/results/${index + 1}` })),
-    status: "succeeded"
-  }, 200, cors);
+  return jobSucceededResponse(jobId, output, cors);
 }
 
 async function getTryOnResult(jobId: string, resultIndex: number, env: Env, cors: Headers): Promise<Response> {
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
+  const childJob = await getChildJobStatus(env, jobId);
+  if (childJob.state === "processing") return json({ error: "结果尚未生成" }, 409, cors);
+  if (childJob.state === "failed") return json({ error: childJob.message }, 502, cors);
+  if (childJob.state === "succeeded") return storedResultResponse(childJob.output.results[resultIndex - 1], env, cors);
+
   let workflowStatus: InstanceStatus;
   try {
     workflowStatus = await getJobWorkflowStatus(env, jobId);
@@ -408,7 +386,20 @@ async function getTryOnResult(jobId: string, resultIndex: number, env: Env, cors
   if (workflowStatus.status !== "complete") return json({ error: "结果尚未生成" }, 409, cors);
   const output = parseWorkflowOutput(workflowStatus.output);
   if (!output || output.status === "failed") return json({ error: output?.message || "后台任务未能完成，请重新提交" }, 502, cors);
-  const result = output.results[resultIndex - 1];
+  return storedResultResponse(output.results[resultIndex - 1], env, cors);
+}
+
+function jobSucceededResponse(jobId: string, output: SucceededTryOnOutput, cors: Headers): Response {
+  return json({
+    failedCount: output.failedCount,
+    mode: output.mode,
+    resultCount: output.results.length,
+    results: output.results.map((_, index) => ({ url: `/api/try-on/jobs/${jobId}/results/${index + 1}` })),
+    status: "succeeded"
+  }, 200, cors);
+}
+
+async function storedResultResponse(result: StoredResult | undefined, env: Env, cors: Headers): Promise<Response> {
   if (!result) return json({ error: "试穿结果不存在" }, 404, cors);
   const stored = await getStoredImage(env, result.resultKey);
   if (!stored?.body) return json({ error: "结果已过期，请重新生成" }, 410, cors);
@@ -463,6 +454,44 @@ async function putTemporaryImage(env: Env, key: string, file: File): Promise<voi
     body: file
   });
   if (!response.ok) throw new Error(`Temporary image upload failed: ${response.status}`);
+}
+
+async function putJobManifest(env: Env, jobId: string, manifest: JobManifest): Promise<void> {
+  if (!JOB_PATTERN.test(jobId)) throw new Error("Invalid workflow job id");
+  const response = await storageClient(env).fetch(storageUrl(env, manifestKey(jobId)), {
+    method: "PUT",
+    headers: { "Cache-Control": "private, no-store", "Content-Type": "application/json" },
+    body: JSON.stringify(manifest)
+  });
+  if (!response.ok) throw new Error(`Job manifest upload failed: ${response.status}`);
+}
+
+async function getJobManifest(env: Env, jobId: string): Promise<JobManifest | null> {
+  const response = await storageClient(env).fetch(storageUrl(env, manifestKey(jobId)));
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Job manifest read failed: ${response.status}`);
+  const length = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(length) && length > MAX_MANIFEST_BYTES) throw new Error("Job manifest exceeded the size limit");
+  const value = await response.json<unknown>();
+  if (!value || typeof value !== "object") throw new Error("Job manifest was malformed");
+  const manifest = value as Partial<JobManifest>;
+  if (manifest.version !== 2 || !Number.isInteger(manifest.childCount) || Number(manifest.childCount) < 1 || Number(manifest.childCount) > MAX_GARMENTS || !MODE_VALUES.has(String(manifest.mode))) {
+    throw new Error("Job manifest was invalid");
+  }
+  return { childCount: Number(manifest.childCount), mode: manifest.mode as TryOnMode, version: 2 };
+}
+
+async function deleteJobManifest(env: Env, jobId: string): Promise<void> {
+  try {
+    const response = await storageClient(env).fetch(storageUrl(env, manifestKey(jobId)), { method: "DELETE" });
+    if (!response.ok && response.status !== 404) console.error(JSON.stringify({ event: "job_manifest_delete_failed", status: response.status }));
+  } catch (error) {
+    console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error), event: "job_manifest_delete_failed" }));
+  }
+}
+
+function manifestKey(jobId: string): string {
+  return `${RESULT_PREFIX}/${jobId}.json`;
 }
 
 async function storeCompletedImage(env: Env, jobId: string, resultIndex: number, outputUrl: string): Promise<StoredResult> {
@@ -533,18 +562,27 @@ type TryOnMode = "layered" | "separate";
 type PoseMode = "original" | "studio" | "reference";
 type TryOnWorkflowParams = { extensions: string[]; generations: GenerationRequest[]; jobId: string; mode: TryOnMode; storagePrefix: string };
 type TryOnLookWorkflowParams = { generation: GenerationRequest; jobId: string; resultIndex: number };
+type SucceededTryOnOutput = { failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" };
 type TryOnWorkflowOutput =
-  | { failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" }
+  | SucceededTryOnOutput
+  | { message: string; status: "failed" };
+type TryOnBatchWorkflowOutput =
+  | { childCount: number; status: "delegated" }
   | { message: string; status: "failed" };
 type TryOnLookWorkflowOutput =
   | { result: StoredResult; status: "succeeded" }
   | { reason: LookFailureReason; status: "failed" };
+type JobManifest = { childCount: number; mode: TryOnMode; version: 2 };
+type ChildJobStatus =
+  | { state: "not_found" }
+  | { state: "processing" }
+  | { message: string; state: "failed" }
+  | { output: SucceededTryOnOutput; state: "succeeded" };
 type LookFailureReason = "gateway_auth" | "internal_error" | "invalid_output" | "provider_failed" | "provider_timeout";
 type MobPollResult =
   | { kind: "response"; response: MobResponse }
   | { kind: "fatal" }
   | { kind: "transient" };
-type LookStatusSnapshot = { output: TryOnLookWorkflowOutput | null; status: InstanceStatus["status"] };
 type MobResponse = {
   status?: string;
   task?: { id?: string; providerStatus?: string; status?: string };
@@ -643,6 +681,72 @@ function parseLookWorkflowOutput(value: unknown): TryOnLookWorkflowOutput | null
     return { result: output.result, status: "succeeded" };
   }
   return null;
+}
+
+async function getChildJobStatus(env: Env, jobId: string): Promise<ChildJobStatus> {
+  const manifest = await getJobManifest(env, jobId);
+  const expectedCount = manifest?.childCount ?? MAX_GARMENTS;
+  const observed: InstanceStatus[] = [];
+
+  for (let index = 1; index <= expectedCount; index += 1) {
+    try {
+      const status = await (await env.TRY_ON_LOOK_WORKFLOW.get(`${jobId}-look-${index}`)).status();
+      if (status.status === "unknown") {
+        if (manifest) return getBatchFailureOrProcessing(env, jobId);
+        break;
+      }
+      observed.push(status);
+    } catch {
+      if (manifest) return getBatchFailureOrProcessing(env, jobId);
+      break;
+    }
+  }
+
+  if (!observed.length) return { state: "not_found" };
+  if (manifest && observed.length !== manifest.childCount) return { state: "processing" };
+  if (observed.some((status) => ["queued", "running", "waiting", "waitingForPause", "paused"].includes(status.status))) {
+    return { state: "processing" };
+  }
+
+  const results: StoredResult[] = [];
+  let failedCount = 0;
+  for (const status of observed) {
+    if (status.status !== "complete") {
+      failedCount += 1;
+      continue;
+    }
+    const output = parseLookWorkflowOutput(status.output);
+    if (!output || output.status === "failed") {
+      failedCount += 1;
+      continue;
+    }
+    results.push(output.result);
+  }
+
+  if (!results.length) return { message: "这组图片没能生成结果，请换用更清晰、无遮挡的照片再试", state: "failed" };
+  return {
+    output: {
+      failedCount,
+      mode: manifest?.mode ?? (observed.length > 1 ? "separate" : "layered"),
+      results,
+      status: "succeeded"
+    },
+    state: "succeeded"
+  };
+}
+
+async function getBatchFailureOrProcessing(env: Env, jobId: string): Promise<ChildJobStatus> {
+  try {
+    const status = await (await env.TRY_ON_BATCH_WORKFLOW.get(jobId)).status();
+    if (["queued", "running", "waiting", "waitingForPause", "paused", "unknown"].includes(status.status)) return { state: "processing" };
+    if (status.status === "complete") {
+      const output = status.output as Partial<TryOnBatchWorkflowOutput> | null;
+      if (output?.status === "failed" && typeof output.message === "string") return { message: output.message, state: "failed" };
+    }
+  } catch {
+    return { state: "processing" };
+  }
+  return { message: "后台任务未能启动，请重新提交", state: "failed" };
 }
 
 async function workflowExists(workflow: Workflow, jobId: string): Promise<boolean> {
