@@ -144,7 +144,7 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const qualityInput = stringValue(input.get("quality"));
   const quality = QUALITY_VALUES.has(qualityInput) ? qualityInput : "medium";
   const modeInput = stringValue(input.get("mode"));
-  const mode: TryOnMode = MODE_VALUES.has(modeInput) ? modeInput as TryOnMode : "layered";
+  const mode: TryOnMode = MODE_VALUES.has(modeInput) ? modeInput as TryOnMode : "separate";
 
   if (consent !== "true") return json({ error: "请先确认已获得照片中人物的许可" }, 400, cors);
   if (!(person instanceof File)) return json({ error: "请先上传一张真人照片" }, 400, cors);

@@ -1,4 +1,5 @@
 const API_BASE = "https://lv-virtual-try-on.s98081096.workers.dev";
+const PUBLIC_APP_URL = "https://augustzad.github.io/lv-virtual-try-on/";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -169,6 +170,15 @@ function stopProgress(complete = false) {
 
 async function generateTryOn() {
   if (activeJobId || !personFile || !garmentFiles.length || !elements.consent.checked) return;
+  if (window.location.protocol === "file:") {
+    elements.errorMessage.textContent = "本地文件可以预览照片，请打开线上版本开始生成。";
+    elements.retry.textContent = "打开线上版本";
+    elements.resultMeta.textContent = "Open live app";
+    setView("error");
+    elements.resultPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+  elements.retry.textContent = "再试一次";
   setView("generating");
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
@@ -182,7 +192,7 @@ async function generateTryOn() {
   body.append("consent", "true");
   body.append("direction", elements.direction.value.trim());
   body.append("quality", elements.quality.value);
-  body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "layered");
+  body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "separate");
 
   try {
     const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
@@ -316,7 +326,10 @@ elements.garmentInput.addEventListener("change", (event) => {
 });
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
-elements.retry.addEventListener("click", generateTryOn);
+elements.retry.addEventListener("click", () => {
+  if (window.location.protocol === "file:") window.location.assign(PUBLIC_APP_URL);
+  else generateTryOn();
+});
 elements.reset.addEventListener("click", () => {
   setView("empty");
   elements.resultMeta.textContent = "Ready to revise";

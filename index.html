@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=3">
   </head>
   <body>
     <header class="site-header">
@@ -75,14 +75,14 @@
             <legend>Try-on mode</legend>
             <div class="mode-options">
               <label class="mode-option">
-                <input type="radio" name="tryOnMode" value="layered" checked>
+                <input type="radio" name="tryOnMode" value="layered">
                 <span>
                   <strong>Layered outfit</strong>
                   <small>Wear every piece together.</small>
                 </span>
               </label>
               <label class="mode-option">
-                <input type="radio" name="tryOnMode" value="separate">
+                <input type="radio" name="tryOnMode" value="separate" checked>
                 <span>
                   <strong>Separate looks</strong>
                   <small>One result per piece.</small>
@@ -177,7 +177,7 @@
               </div>
             </div>
 
-            <div class="error-state" id="errorState" hidden>
+            <div class="error-state" id="errorState" role="alert" aria-live="assertive" hidden>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 4.2 2.8 17.3A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.7L13.7 4.2a2 2 0 0 0-3.4 0Z"/></svg>
               <p id="errorMessage">生成遇到了一点问题</p>
               <button id="retryButton" type="button">再试一次</button>
@@ -197,6 +197,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js" type="module"></script>
+    <script src="app.js?v=3" defer></script>
   </body>
 </html>
