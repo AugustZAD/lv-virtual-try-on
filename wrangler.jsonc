@@ -7,7 +7,10 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "vars": {
-    "ALLOWED_ORIGIN": "https://augustzad.github.io"
+    "ALLOWED_ORIGIN": "https://augustzad.github.io",
+    "R2_BUCKET": "moonshort",
+    "R2_ENDPOINT": "https://1864b23e2ad974bd34683242725588c7.r2.cloudflarestorage.com",
+    "R2_PUBLIC_BASE": "https://r2-assets.mob-ai.cn"
   },
   "ratelimits": [
     {

@@ -5,10 +5,11 @@
 ## 架构
 
 - **GitHub Pages**：静态网页与本地图片预览。
-- **Cloudflare Worker**：校验上传内容、限制生成频率，并安全调用 OpenAI Images Edit API。
-- **GPT Image 2**：以真人照为第一张高保真输入，其余图片作为一组服装参考。
+- **Cloudflare Worker**：校验上传内容、限制生成频率，并通过 Mob AI 网关提交和查询异步任务。
+- **Mob AI `image-gpt`**：由网关路由至 GPT Image 2，以真人照为第一张输入，其余图片作为一组服装参考。
+- **MobAI R2**：使用不可猜的临时路径向网关提供参考图，任务结束后立即删除；生命周期规则会在 24 小时后兜底清理中断任务。
 
-图片不会写入 KV、R2、数据库或日志。Worker 只在当前请求中转发图片，并把生成结果直接返回浏览器。
+密钥、上游任务 ID 和参考图地址都不会进入前端包或日志。浏览器只收到加密的临时任务 ID，生成结果由 Worker 转发。
 
 ## 本地运行
 
@@ -26,7 +27,7 @@ npm install
 npm run cf:dev
 ```
 
-在 `.dev.vars` 中填写 `OPENAI_API_KEY`。不要提交这个文件。
+在 `.dev.vars` 中填写 `MOB_AI_API_KEY`、任务加密密钥和 R2 访问密钥。不要提交这个文件。
 
 ## 检查与部署
 
@@ -34,7 +35,10 @@ npm run cf:dev
 npm run cf:types
 npm run check
 npx wrangler deploy --dry-run
-npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put MOB_AI_API_KEY
+npx wrangler secret put TRY_ON_JOB_SECRET
+npx wrangler secret put R2_ACCESS_KEY_ID
+npx wrangler secret put R2_SECRET_ACCESS_KEY
 npm run cf:deploy
 ```
 

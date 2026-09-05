@@ -1,28 +1,42 @@
-const OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
+import { AwsClient } from "aws4fetch";
+
+const MOB_AI_GENERATIONS_URL = "https://ai.mob-ai.cn/api/v1/generations";
+const MOB_AI_IMAGE_MODEL = "image-gpt";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
+const JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const UPLOAD_PREFIX = "temporary/lv-virtual-try-on";
 const LOCAL_ORIGIN_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
+const JOB_PATTERN = /^job_([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{24,2000})$/;
+const STORAGE_PREFIX_PATTERN = /^temporary\/lv-virtual-try-on\/[a-f0-9]{32}$/;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const QUALITY_VALUES = new Set(["low", "medium", "high"]);
+const PROCESSING_STATUSES = new Set(["submitted", "queued", "pending", "processing", "running"]);
+const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled"]);
+const SUCCEEDED_STATUSES = new Set(["succeeded", "success", "completed"]);
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return handleOptions(request, env);
     if (request.method === "GET" && url.pathname === "/") {
-      return json({ model: "gpt-image-2", service: "lv-virtual-try-on", status: "ok" }, 200);
-    }
-    if (request.method !== "POST" || url.pathname !== "/api/try-on") {
-      return json({ error: "Not found" }, 404);
+      return json({ gateway: "mob-ai", model: MOB_AI_IMAGE_MODEL, service: "lv-virtual-try-on", status: "ok" }, 200);
     }
 
     const cors = corsFor(request, env);
     if (!cors) return json({ error: "Origin not allowed" }, 403);
-    if (!env.OPENAI_API_KEY) return json({ error: "图像生成服务尚未配置" }, 503, cors);
+    if (!hasRequiredConfiguration(env)) return json({ error: "图像生成服务尚未配置" }, 503, cors);
 
     try {
-      return await createTryOn(request, env, cors);
+      if (request.method === "POST" && url.pathname === "/api/try-on") {
+        return await createTryOn(request, env, cors);
+      }
+      const jobMatch = request.method === "GET"
+        ? url.pathname.match(/^\/api\/try-on\/jobs\/(job_[A-Za-z0-9_.-]+)$/)
+        : null;
+      if (jobMatch) return await getTryOnJob(jobMatch[1], env, cors, ctx);
+      return json({ error: "Not found" }, 404, cors);
     } catch (error) {
       console.error(JSON.stringify({
         error: error instanceof Error ? error.message : String(error),
@@ -39,7 +53,6 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   if (!contentType.startsWith("multipart/form-data")) {
     return json({ error: "请上传真人照和服装图片" }, 415, cors);
   }
-
   const contentLength = Number(request.headers.get("Content-Length"));
   if (Number.isFinite(contentLength) && contentLength > MAX_TOTAL_BYTES) {
     return json({ error: "图片总大小不能超过 40 MB" }, 413, cors);
@@ -72,84 +85,235 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const rateLimit = await env.TRY_ON_RATE_LIMITER.limit({ key: rateKey });
   if (!rateLimit.success) return json({ error: "生成得有点频繁，请一分钟后再试" }, 429, cors);
 
-  const openaiBody = new FormData();
-  openaiBody.append("model", "gpt-image-2");
-  openaiBody.append("prompt", buildPrompt(garments.length, direction));
-  openaiBody.append("quality", quality);
-  openaiBody.append("size", "1024x1536");
-  openaiBody.append("output_format", "jpeg");
-  openaiBody.append("output_compression", "90");
-  imageFiles.forEach((file, index) => {
-    openaiBody.append("image[]", file, index === 0 ? "person.jpg" : `garment-${index}.jpg`);
-  });
-
-  const response = await fetch(OPENAI_IMAGE_EDIT_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-    body: openaiBody
-  });
-
-  if (!response.ok) {
-    const requestId = response.headers.get("x-request-id") || "unknown";
-    const detail = await readBoundedJson(response);
-    console.error(JSON.stringify({
-      event: "openai_image_edit_failed",
-      openaiRequestId: requestId,
-      status: response.status,
-      type: detail?.error?.type || "unknown"
+  const storagePrefix = `${UPLOAD_PREFIX}/${randomHex(16)}`;
+  const extensions = imageFiles.map((file) => imageExtension(file.type));
+  let uploadedCount = 0;
+  try {
+    for (const [index, file] of imageFiles.entries()) {
+      await putTemporaryImage(env, `${storagePrefix}/${index}.${extensions[index]}`, file);
+      uploadedCount += 1;
+    }
+    const references = imageFiles.map((_, index) => ({
+      type: "image" as const,
+      url: `${trimTrailingSlash(env.R2_PUBLIC_BASE)}/${storagePrefix}/${index}.${extensions[index]}`
     }));
-    const message = response.status === 429
-      ? "当前生成任务较多，请稍后再试"
-      : response.status === 400
-        ? "图片暂时无法处理，请换一组更清晰的照片"
-        : "图像生成服务暂时不可用，请稍后再试";
-    return json({ error: message }, response.status === 429 ? 429 : 502, cors);
-  }
+    const submitted = await mobPost(env, {
+      model: MOB_AI_IMAGE_MODEL,
+      mode: "async",
+      input: {
+        aspectRatio: "2:3",
+        prompt: buildPrompt(garments.length, direction, quality),
+        references
+      }
+    });
+    const taskId = submitted.task?.id ?? submitted.result?.taskId;
+    if (!taskId || taskId.length > 300) throw new Error("Mob AI submit response omitted task id");
 
-  const result = await response.json<OpenAIImageResponse>();
-  const encoded = result.data?.[0]?.b64_json;
-  if (!encoded) return json({ error: "图像生成服务没有返回图片" }, 502, cors);
-  const imageBytes = decodeBase64(encoded);
-  const headers = new Headers(cors);
-  headers.set("Cache-Control", "no-store");
-  headers.set("Content-Disposition", 'inline; filename="lv-fitting.jpg"');
-  headers.set("Content-Type", "image/jpeg");
-  headers.set("X-Content-Type-Options", "nosniff");
-  return new Response(imageBytes, { status: 200, headers });
+    const jobId = await encodeJob({
+      count: imageFiles.length,
+      extensions,
+      issuedAt: Date.now(),
+      storagePrefix,
+      taskId,
+      version: 1
+    }, env.TRY_ON_JOB_SECRET);
+    return json({ jobId, pollAfterMs: 3500, status: "processing" }, 202, cors);
+  } catch (error) {
+    if (uploadedCount > 0) await deleteTemporaryImages(env, storagePrefix, extensions.slice(0, uploadedCount));
+    throw error;
+  }
 }
 
-function buildPrompt(garmentCount: number, direction: string): string {
-  const optionalDirection = direction
-    ? `\nStyling direction from the user: ${direction}`
-    : "";
-  return `Create one photorealistic virtual try-on image. The FIRST input image is the source person. The remaining ${garmentCount} image${garmentCount === 1 ? " is a garment reference" : "s are garment references"} that must be worn together as one coherent outfit.
+async function getTryOnJob(jobId: string, env: Env, cors: Headers, ctx: ExecutionContext): Promise<Response> {
+  let job: JobState;
+  try {
+    job = await decodeJob(jobId, env.TRY_ON_JOB_SECRET);
+  } catch {
+    return json({ error: "生成任务无效或已过期" }, 400, cors);
+  }
 
-Preserve the source person's recognizable facial identity, hairstyle, skin tone, body proportions, pose, hands, camera angle, framing, and background. Change only the clothing needed for the outfit. Reproduce each referenced garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Layer the garments in a physically plausible order. Render natural drape, folds, occlusion, lighting, shadows, and contact with the body. Keep any original shoes or accessories unless a supplied garment clearly replaces them. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result should look like a real fashion photograph, not a collage or illustration.${optionalDirection}`;
+  const status = await mobPost(env, {
+    model: MOB_AI_IMAGE_MODEL,
+    mode: "async",
+    input: { taskId: job.taskId }
+  });
+  const normalized = (status.status || "").toLowerCase();
+  if (PROCESSING_STATUSES.has(normalized)) {
+    return json({ jobId, pollAfterMs: 3500, status: "processing" }, 202, cors);
+  }
+  if (FAILED_STATUSES.has(normalized)) {
+    ctx.waitUntil(deleteTemporaryImages(env, job.storagePrefix, job.extensions));
+    return json({ error: "这组图片暂时无法完成，请换一组更清晰的照片再试" }, 502, cors);
+  }
+  if (!SUCCEEDED_STATUSES.has(normalized)) throw new Error(`Mob AI returned unknown status: ${normalized || "empty"}`);
+
+  const outputUrl = status.output?.url ?? status.images?.[0]?.url;
+  if (!outputUrl || new URL(outputUrl).protocol !== "https:") throw new Error("Mob AI completed without a valid image URL");
+  const output = await fetch(outputUrl, { redirect: "follow" });
+  if (!output.ok || !output.body) throw new Error(`Mob AI image download failed: ${output.status}`);
+  const outputType = output.headers.get("Content-Type") || "image/png";
+  if (!outputType.startsWith("image/")) throw new Error("Mob AI output was not an image");
+
+  ctx.waitUntil(deleteTemporaryImages(env, job.storagePrefix, job.extensions));
+  const headers = new Headers(cors);
+  headers.set("Cache-Control", "no-store");
+  headers.set("Content-Disposition", 'inline; filename="lv-fitting.png"');
+  headers.set("Content-Type", outputType);
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(output.body, { status: 200, headers });
+}
+
+async function mobPost(env: Env, body: Record<string, unknown>): Promise<MobResponse> {
+  const response = await fetch(MOB_AI_GENERATIONS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.MOB_AI_API_KEY}`,
+      "Content-Type": "application/json",
+      "User-Agent": "lv-virtual-try-on/1.0"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const detail = await readMobError(response);
+    console.error(JSON.stringify({ event: "mob_ai_image_failed", message: detail, status: response.status }));
+    throw new Error(`Mob AI request failed: ${response.status}${detail ? ` ${detail}` : ""}`);
+  }
+  const value = await response.json<unknown>();
+  if (!value || typeof value !== "object") throw new Error("Mob AI returned malformed JSON");
+  return value as MobResponse;
+}
+
+async function readMobError(response: Response): Promise<string> {
+  const length = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(length) && length > 64 * 1024) return "";
+  try {
+    const payload = await response.json<{ error?: string | { message?: string }; message?: string }>();
+    const message = typeof payload.error === "string"
+      ? payload.error
+      : typeof payload.error?.message === "string"
+        ? payload.error.message
+        : typeof payload.message === "string" ? payload.message : "";
+    return message.slice(0, 300);
+  } catch {
+    return "";
+  }
+}
+
+function storageClient(env: Env): AwsClient {
+  return new AwsClient({
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    service: "s3",
+    region: "auto"
+  });
+}
+
+function storageUrl(env: Env, key: string): string {
+  const endpoint = trimTrailingSlash(env.R2_ENDPOINT);
+  return `${endpoint}/${encodeURIComponent(env.R2_BUCKET)}/${key.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function putTemporaryImage(env: Env, key: string, file: File): Promise<void> {
+  const response = await storageClient(env).fetch(storageUrl(env, key), {
+    method: "PUT",
+    headers: { "Cache-Control": "private, no-store", "Content-Type": file.type },
+    body: file
+  });
+  if (!response.ok) throw new Error(`Temporary image upload failed: ${response.status}`);
+}
+
+async function deleteTemporaryImages(env: Env, prefix: string, extensions: string[]): Promise<void> {
+  if (!STORAGE_PREFIX_PATTERN.test(prefix) || extensions.length < 1 || extensions.length > MAX_GARMENTS + 1 ||
+      extensions.some((extension) => !/^(?:jpg|png|webp)$/.test(extension))) return;
+  await Promise.all(extensions.map(async (extension, index) => {
+    try {
+      const response = await storageClient(env).fetch(storageUrl(env, `${prefix}/${index}.${extension}`), { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        console.error(JSON.stringify({ event: "temporary_image_delete_failed", status: response.status }));
+      }
+    } catch (error) {
+      console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error), event: "temporary_image_delete_failed" }));
+    }
+  }));
+}
+
+function buildPrompt(garmentCount: number, direction: string, quality: string): string {
+  const optionalDirection = direction ? `\nStyling direction from the user: ${direction}` : "";
+  const detail = quality === "high" ? "Prioritize maximum textile and construction detail." : quality === "low" ? "Prioritize a clean, fast fashion preview." : "Use balanced editorial detail.";
+  return `Create one photorealistic virtual try-on image. The FIRST reference image is the source person. The remaining ${garmentCount} reference image${garmentCount === 1 ? " is a garment" : "s are garments"} that must be worn together as one coherent outfit.
+
+Preserve the source person's recognizable facial identity, hairstyle, skin tone, body proportions, pose, hands, camera angle, framing, and background. Change only the clothing needed for the outfit. Reproduce each referenced garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Layer garments in a physically plausible order. Render natural drape, folds, occlusion, lighting, shadows, and contact with the body. Keep original shoes and accessories unless a supplied garment clearly replaces them. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result must look like a real fashion photograph, not a collage or illustration. ${detail}${optionalDirection}`;
+}
+
+type JobState = { count: number; extensions: string[]; issuedAt: number; storagePrefix: string; taskId: string; version: 1 };
+type MobResponse = {
+  status?: string;
+  task?: { id?: string; providerStatus?: string };
+  result?: { taskId?: string };
+  output?: { type?: string; url?: string };
+  images?: Array<{ url?: string }>;
+};
+
+async function encodeJob(job: JobState, secret: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await jobKey(secret);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(job)));
+  return `job_${base64Url(iv)}.${base64Url(new Uint8Array(encrypted))}`;
+}
+
+async function decodeJob(value: string, secret: string): Promise<JobState> {
+  const match = value.match(JOB_PATTERN);
+  if (!match) throw new Error("Malformed job id");
+  const key = await jobKey(secret);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64Url(match[1]) }, key, fromBase64Url(match[2]));
+  const job = JSON.parse(new TextDecoder().decode(decrypted)) as Partial<JobState>;
+  if (job.version !== 1 || typeof job.taskId !== "string" || !job.taskId || job.taskId.length > 300 ||
+      typeof job.storagePrefix !== "string" || !STORAGE_PREFIX_PATTERN.test(job.storagePrefix) ||
+      !Number.isInteger(job.count) || (job.count ?? 0) < 2 || (job.count ?? 0) > MAX_GARMENTS + 1 ||
+      !Array.isArray(job.extensions) || job.extensions.length !== job.count ||
+      job.extensions.some((extension) => typeof extension !== "string" || !/^(?:jpg|png|webp)$/.test(extension)) ||
+      typeof job.issuedAt !== "number" || Date.now() - job.issuedAt > JOB_MAX_AGE_MS || job.issuedAt - Date.now() > 60_000) {
+    throw new Error("Invalid job state");
+  }
+  return job as JobState;
+}
+
+async function jobKey(secret: string): Promise<CryptoKey> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function fromBase64Url(value: string): Uint8Array {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function randomHex(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function imageExtension(contentType: string): string {
+  return contentType === "image/png" ? "png" : contentType === "image/webp" ? "webp" : "jpg";
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/u, "");
 }
 
 function stringValue(value: string | File | null): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function decodeBase64(value: string): ArrayBuffer {
-  const binary = atob(value);
-  const buffer = new ArrayBuffer(binary.length);
-  const output = new Uint8Array(buffer);
-  for (let index = 0; index < binary.length; index += 1) output[index] = binary.charCodeAt(index);
-  return buffer;
-}
-
-type OpenAIErrorResponse = { error?: { type?: string } };
-type OpenAIImageResponse = { data?: Array<{ b64_json?: string }> };
-
-async function readBoundedJson(response: Response): Promise<OpenAIErrorResponse | null> {
-  const length = Number(response.headers.get("Content-Length"));
-  if (Number.isFinite(length) && length > 64 * 1024) return null;
-  try {
-    return await response.json<OpenAIErrorResponse>();
-  } catch {
-    return null;
-  }
+function hasRequiredConfiguration(env: Env): boolean {
+  return Boolean(env.MOB_AI_API_KEY && env.TRY_ON_JOB_SECRET && env.R2_ENDPOINT && env.R2_ACCESS_KEY_ID &&
+    env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET && env.R2_PUBLIC_BASE);
 }
 
 function corsFor(request: Request, env: Env): Headers | null {
@@ -158,7 +322,7 @@ function corsFor(request: Request, env: Env): Headers | null {
   if (!origin || !allowed) return null;
   return new Headers({
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin"

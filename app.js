@@ -168,15 +168,21 @@ async function generateTryOn() {
   body.append("quality", elements.quality.value);
 
   try {
-    const response = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
-    if (!response.ok) {
-      let message = "生成失败，请稍后再试";
-      try {
-        const detail = await response.json();
-        if (detail.error) message = detail.error;
-      } catch {}
-      throw new Error(message);
+    const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
+    if (!submitted.ok) throw new Error(await responseError(submitted));
+    const task = await submitted.json();
+    if (!task.jobId || task.status !== "processing") throw new Error("服务没有返回有效任务");
+
+    let response;
+    let pollAfterMs = Number(task.pollAfterMs) || 3500;
+    while (true) {
+      await delay(Math.max(1500, Math.min(10000, pollAfterMs)));
+      response = await fetch(`${API_BASE}/api/try-on/jobs/${encodeURIComponent(task.jobId)}`);
+      if (response.status !== 202) break;
+      const progress = await response.json();
+      pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
     }
+    if (!response.ok) throw new Error(await responseError(response));
     const blob = await response.blob();
     if (!blob.type.startsWith("image/")) throw new Error("服务没有返回有效图片");
     if (resultUrl) URL.revokeObjectURL(resultUrl);
@@ -194,6 +200,19 @@ async function generateTryOn() {
     elements.generate.querySelector("span").textContent = "生成试穿效果";
     updateButton();
   }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function responseError(response) {
+  let message = "生成失败，请稍后再试";
+  try {
+    const detail = await response.json();
+    if (detail.error) message = detail.error;
+  } catch {}
+  return message;
 }
 
 elements.personInput.addEventListener("change", (event) => {
@@ -218,7 +237,7 @@ elements.download.addEventListener("click", () => {
   if (!resultUrl) return;
   const link = document.createElement("a");
   link.href = resultUrl;
-  link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}.jpg`;
+  link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}.png`;
   link.click();
 });
 

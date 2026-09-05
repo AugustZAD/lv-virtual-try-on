@@ -1,1 +1,4 @@
-OPENAI_API_KEY=your_openai_api_key_here
+MOB_AI_API_KEY=your_mob_ai_api_key_here
+TRY_ON_JOB_SECRET=use_a_long_random_value_here
+R2_ACCESS_KEY_ID=your_r2_access_key_id_here
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key_here
