@@ -24,14 +24,18 @@ const elements = {
   personImage: document.querySelector("#personImage"),
   personInput: document.querySelector("#personInput"),
   personPreview: document.querySelector("#personPreview"),
+  previousResult: document.querySelector("#previousResultButton"),
   progress: document.querySelector("#progressBar"),
   quality: document.querySelector("#qualityInput"),
   reset: document.querySelector("#resetButton"),
   resultEmpty: document.querySelector("#resultEmpty"),
   resultImage: document.querySelector("#resultImage"),
   resultMeta: document.querySelector("#resultMeta"),
+  resultPager: document.querySelector("#resultPager"),
   resultPanel: document.querySelector("#resultPanel"),
+  resultPosition: document.querySelector("#resultPosition"),
   resultReady: document.querySelector("#resultReady"),
+  nextResult: document.querySelector("#nextResultButton"),
   retry: document.querySelector("#retryButton")
 };
 
@@ -39,7 +43,8 @@ let personFile = null;
 let personUrl = "";
 let garmentFiles = [];
 let garmentUrls = [];
-let resultUrl = "";
+let resultUrls = [];
+let activeResultIndex = 0;
 let progressTimer = 0;
 let activeJobId = "";
 
@@ -177,6 +182,7 @@ async function generateTryOn() {
   body.append("consent", "true");
   body.append("direction", elements.direction.value.trim());
   body.append("quality", elements.quality.value);
+  body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "layered");
 
   try {
     const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
@@ -203,18 +209,41 @@ async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
     clearPendingJob(jobId);
     throw new Error(await responseError(response));
   }
-  const blob = await response.blob();
-  if (!blob.type.startsWith("image/")) {
+  const completed = await response.json();
+  if (completed.status !== "succeeded" || !Array.isArray(completed.results) || !completed.results.length) {
     clearPendingJob(jobId);
-    throw new Error("服务没有返回有效图片");
+    throw new Error("服务没有返回有效结果");
   }
-  if (resultUrl) URL.revokeObjectURL(resultUrl);
-  resultUrl = URL.createObjectURL(blob);
-  elements.resultImage.src = resultUrl;
+  const blobs = await Promise.all(completed.results.map(async (result) => {
+    const resultResponse = await fetch(`${API_BASE}${result.url}`);
+    if (!resultResponse.ok) throw new Error(await responseError(resultResponse));
+    const blob = await resultResponse.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("服务没有返回有效图片");
+    return blob;
+  }));
+  resultUrls.forEach((url) => URL.revokeObjectURL(url));
+  resultUrls = blobs.map((blob) => URL.createObjectURL(blob));
+  activeResultIndex = 0;
+  renderActiveResult();
   clearPendingJob(jobId);
   stopProgress(true);
   window.setTimeout(() => setView("ready"), 260);
-  elements.resultMeta.textContent = "Ready";
+  elements.resultMeta.textContent = completed.failedCount
+    ? `${resultUrls.length} ready · ${completed.failedCount} skipped`
+    : resultUrls.length > 1 ? `${resultUrls.length} looks` : "Ready";
+}
+
+function renderActiveResult() {
+  if (!resultUrls.length) return;
+  activeResultIndex = Math.max(0, Math.min(resultUrls.length - 1, activeResultIndex));
+  elements.resultImage.src = resultUrls[activeResultIndex];
+  elements.resultImage.alt = resultUrls.length > 1
+    ? `AI 生成的试穿效果，第 ${activeResultIndex + 1} 张，共 ${resultUrls.length} 张`
+    : "AI 生成的真人试穿效果";
+  elements.resultPosition.textContent = `${activeResultIndex + 1} / ${resultUrls.length}`;
+  elements.previousResult.disabled = activeResultIndex === 0;
+  elements.nextResult.disabled = activeResultIndex === resultUrls.length - 1;
+  elements.resultPager.hidden = resultUrls.length < 2;
 }
 
 async function waitForBackgroundJob(jobId, initialPollAfterMs) {
@@ -294,11 +323,19 @@ elements.reset.addEventListener("click", () => {
   elements.direction.focus();
   window.scrollTo({ top: elements.direction.getBoundingClientRect().top + window.scrollY - 80, behavior: "smooth" });
 });
+elements.previousResult.addEventListener("click", () => {
+  activeResultIndex -= 1;
+  renderActiveResult();
+});
+elements.nextResult.addEventListener("click", () => {
+  activeResultIndex += 1;
+  renderActiveResult();
+});
 elements.download.addEventListener("click", () => {
-  if (!resultUrl) return;
+  if (!resultUrls[activeResultIndex]) return;
   const link = document.createElement("a");
-  link.href = resultUrl;
-  link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}.png`;
+  link.href = resultUrls[activeResultIndex];
+  link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}-look-${activeResultIndex + 1}.png`;
   link.click();
 });
 

@@ -113,7 +113,20 @@ h1 em { display: block; color: var(--accent); font-weight: 400; }
 .garment-card button svg { width: 12px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.7; }
 .garment-index { position: absolute; left: 6px; bottom: 6px; padding: 4px 6px; color: var(--white); background: rgba(23, 22, 19, 0.7); font-family: var(--serif); font-size: 9px; }
 
-.direction-field { display: block; margin-top: 28px; }
+.mode-fieldset { margin: 26px 0 0; padding: 0; border: 0; }
+.mode-fieldset legend { margin-bottom: 9px; padding: 0; font-size: 10px; font-weight: 600; }
+.mode-options { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); }
+.mode-option { position: relative; display: block; min-width: 0; cursor: pointer; }
+.mode-option + .mode-option { border-left: 1px solid var(--line); }
+.mode-option input { position: absolute; opacity: 0; pointer-events: none; }
+.mode-option > span { display: flex; min-height: 62px; padding: 12px 13px; flex-direction: column; justify-content: center; background: transparent; transition: color 180ms ease, background 180ms ease; }
+.mode-option strong { font-size: 10px; font-weight: 600; }
+.mode-option small { margin-top: 4px; color: var(--muted-ink); font-size: 8px; line-height: 1.35; }
+.mode-option input:checked + span { color: var(--white); background: var(--ink); }
+.mode-option input:checked + span small { color: rgba(255, 253, 249, 0.68); }
+.mode-option:has(input:focus-visible) { z-index: 1; outline: 3px solid rgba(255, 90, 54, 0.28); outline-offset: 3px; }
+
+.direction-field { display: block; margin-top: 22px; }
 .direction-field > span, .settings-row label > span, .format-note > span { display: block; margin-bottom: 9px; font-size: 10px; font-weight: 600; }
 .direction-field small { color: var(--muted-ink); font-weight: 400; }
 textarea { width: 100%; min-height: 78px; padding: 13px 14px; resize: vertical; border: 1px solid var(--line); border-radius: 0; outline: none; color: var(--ink); background: transparent; font-size: 11px; line-height: 1.55; transition: border-color 180ms ease, background 180ms ease; }
@@ -162,6 +175,13 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
 
 .result-ready { position: absolute; inset: 0; }
 .result-ready > img { display: block; width: 100%; height: 100%; object-fit: contain; background: #cfc8be; }
+.result-pager { position: absolute; bottom: 18px; left: 18px; display: flex; min-height: 40px; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.55); align-items: center; color: var(--ink); background: rgba(255, 253, 249, 0.9); backdrop-filter: blur(10px); }
+.result-pager[hidden] { display: none; }
+.result-pager button { display: grid; width: 42px; min-height: 40px; padding: 0; border: 0; place-items: center; color: inherit; background: transparent; }
+.result-pager button:hover:not(:disabled) { color: var(--white); background: var(--ink); }
+.result-pager button:disabled { cursor: default; opacity: 0.28; }
+.result-pager button svg { width: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
+.result-pager span { min-width: 52px; text-align: center; font-size: 9px; font-weight: 600; }
 .result-actions { position: absolute; right: 18px; bottom: 18px; display: flex; gap: 8px; }
 .result-actions button, .error-state button { display: flex; min-height: 40px; padding: 0 14px; border: 1px solid rgba(255, 255, 255, 0.55); align-items: center; gap: 7px; color: var(--ink); background: rgba(255, 253, 249, 0.9); backdrop-filter: blur(10px); font-size: 9px; font-weight: 600; transition: background 180ms ease, color 180ms ease; }
 .result-actions button:hover, .error-state button:hover { color: var(--white); background: var(--ink); }
@@ -212,6 +232,7 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
   .settings-row { gap: 12px; }
   .result-actions { right: 10px; bottom: 10px; left: 10px; }
   .result-actions button { flex: 1; justify-content: center; }
+  .result-pager { bottom: 62px; left: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

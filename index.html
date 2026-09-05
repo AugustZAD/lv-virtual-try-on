@@ -28,7 +28,7 @@
       <section class="intro" aria-labelledby="page-title">
         <p class="eyebrow">VIRTUAL FITTING ROOM</p>
         <h1 id="page-title">See it <em>on you.</em></h1>
-        <p class="lede">One photo. Up to six pieces. One finished look.</p>
+        <p class="lede">One photo. Layer a look or try each piece.</p>
       </section>
 
       <section class="studio" aria-label="AI 试穿工作台">
@@ -70,6 +70,26 @@
               <span>添加衣服</span>
             </label>
           </div>
+
+          <fieldset class="mode-fieldset">
+            <legend>Try-on mode</legend>
+            <div class="mode-options">
+              <label class="mode-option">
+                <input type="radio" name="tryOnMode" value="layered" checked>
+                <span>
+                  <strong>Layered outfit</strong>
+                  <small>Wear every piece together.</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="tryOnMode" value="separate">
+                <span>
+                  <strong>Separate looks</strong>
+                  <small>One result per piece.</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
 
           <label class="direction-field">
             <span>Styling note <small>Optional</small></span>
@@ -136,10 +156,19 @@
 
             <div class="result-ready" id="resultReady" hidden>
               <img id="resultImage" alt="AI 生成的真人试穿效果">
+              <div class="result-pager" id="resultPager" aria-label="试穿结果导航" hidden>
+                <button id="previousResultButton" type="button" aria-label="上一张结果">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>
+                </button>
+                <span id="resultPosition" aria-live="polite">1 / 1</span>
+                <button id="nextResultButton" type="button" aria-label="下一张结果">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>
+                </button>
+              </div>
               <div class="result-actions">
                 <button id="downloadButton" type="button">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
-                  下载图片
+                  下载当前
                 </button>
                 <button id="resetButton" type="button">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.68M4 4v4.68h4.68"/></svg>
