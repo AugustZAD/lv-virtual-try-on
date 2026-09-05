@@ -28,9 +28,16 @@ const elements = {
   personImage: document.querySelector("#personImage"),
   personInput: document.querySelector("#personInput"),
   personPreview: document.querySelector("#personPreview"),
+  poseDropZone: document.querySelector("#poseDropZone"),
+  poseEmpty: document.querySelector("#poseEmpty"),
+  poseFeedback: document.querySelector("#poseFeedback"),
+  poseFeedbackText: document.querySelector("#poseFeedbackText"),
+  poseImage: document.querySelector("#poseImage"),
+  poseInput: document.querySelector("#poseInput"),
+  posePreview: document.querySelector("#posePreview"),
+  poseReferencePanel: document.querySelector("#poseReferencePanel"),
   previousResult: document.querySelector("#previousResultButton"),
   progress: document.querySelector("#progressBar"),
-  quality: document.querySelector("#qualityInput"),
   reset: document.querySelector("#resetButton"),
   resultEmpty: document.querySelector("#resultEmpty"),
   resultImage: document.querySelector("#resultImage"),
@@ -45,6 +52,8 @@ const elements = {
 
 let personFile = null;
 let personUrl = "";
+let poseFile = null;
+let poseUrl = "";
 let garmentFiles = [];
 let garmentUrls = [];
 let resultUrls = [];
@@ -73,6 +82,44 @@ function setPersonFeedback(state, message) {
   elements.personFeedback.classList.toggle("is-success", state === "success");
   elements.personFeedback.classList.toggle("is-error", state === "error");
   elements.personFeedbackText.textContent = message;
+}
+
+function selectedPoseMode() {
+  return document.querySelector('input[name="poseMode"]:checked')?.value || "original";
+}
+
+function setPoseFeedback(state, message) {
+  elements.poseFeedback.classList.toggle("is-success", state === "success");
+  elements.poseFeedback.classList.toggle("is-error", state === "error");
+  elements.poseFeedbackText.textContent = message;
+}
+
+function setPoseReference(file) {
+  const prepared = prepareImage(file);
+  if (prepared.error || !prepared.file) {
+    setPoseFeedback("error", prepared.error || "Pose image could not be added.");
+    elements.poseDropZone.classList.toggle("has-file", Boolean(poseFile));
+    return;
+  }
+  if (poseUrl) URL.revokeObjectURL(poseUrl);
+  poseFile = prepared.file;
+  poseUrl = URL.createObjectURL(prepared.file);
+  elements.poseImage.src = poseUrl;
+  elements.poseEmpty.hidden = true;
+  elements.posePreview.hidden = false;
+  elements.poseDropZone.classList.add("has-file");
+  setPoseFeedback("success", `Pose added · ${prepared.file.name}`);
+  updateButton();
+}
+
+function syncPoseMode() {
+  elements.poseReferencePanel.hidden = selectedPoseMode() !== "reference";
+  updateButton();
+}
+
+function formReady() {
+  const poseReady = selectedPoseMode() !== "reference" || Boolean(poseFile);
+  return Boolean(personFile && garmentFiles.length > 0 && poseReady && elements.consent.checked);
 }
 
 function showTemporaryError(message) {
@@ -142,10 +189,11 @@ function updateButton() {
     elements.resultMeta.textContent = "Background task";
     return;
   }
-  const ready = personFile && garmentFiles.length > 0 && elements.consent.checked;
+  const ready = formReady();
   elements.generate.disabled = !ready;
   if (!personFile) elements.resultMeta.textContent = "Add a photo";
   else if (!garmentFiles.length) elements.resultMeta.textContent = "Add clothing";
+  else if (selectedPoseMode() === "reference" && !poseFile) elements.resultMeta.textContent = "Add pose reference";
   else if (!elements.consent.checked) elements.resultMeta.textContent = "Confirm consent";
   else elements.resultMeta.textContent = `${garmentFiles.length} piece${garmentFiles.length > 1 ? "s" : ""} ready`;
 }
@@ -195,7 +243,7 @@ function stopProgress(complete = false) {
 }
 
 async function generateTryOn() {
-  if (activeJobId || !personFile || !garmentFiles.length || !elements.consent.checked) return;
+  if (activeJobId || !formReady()) return;
   if (window.location.protocol === "file:") {
     elements.errorMessage.textContent = "本地文件可以预览照片，请打开线上版本开始生成。";
     elements.retry.textContent = "打开线上版本";
@@ -217,8 +265,9 @@ async function generateTryOn() {
   garmentFiles.forEach((file) => body.append("garments", file, file.name));
   body.append("consent", "true");
   body.append("direction", elements.direction.value.trim());
-  body.append("quality", elements.quality.value);
   body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "separate");
+  body.append("poseMode", selectedPoseMode());
+  if (selectedPoseMode() === "reference" && poseFile) body.append("poseReference", poseFile, poseFile.name);
 
   try {
     const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
@@ -235,7 +284,7 @@ async function generateTryOn() {
     elements.resultMeta.textContent = "Not completed";
   } finally {
     elements.generate.querySelector("span").textContent = "生成试穿效果";
-    elements.generate.disabled = Boolean(activeJobId) || !(personFile && garmentFiles.length > 0 && elements.consent.checked);
+    elements.generate.disabled = Boolean(activeJobId) || !formReady();
   }
 }
 
@@ -324,7 +373,7 @@ async function restorePendingJob() {
     setView("error");
     elements.resultMeta.textContent = "Not completed";
   } finally {
-    elements.generate.disabled = Boolean(activeJobId) || !(personFile && garmentFiles.length > 0 && elements.consent.checked);
+    elements.generate.disabled = Boolean(activeJobId) || !formReady();
   }
 }
 
@@ -350,6 +399,12 @@ elements.garmentInput.addEventListener("change", (event) => {
   addGarments(event.target.files);
   event.target.value = "";
 });
+elements.poseInput.addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) setPoseReference(file);
+  event.target.value = "";
+});
+document.querySelectorAll('input[name="poseMode"]').forEach((input) => input.addEventListener("change", syncPoseMode));
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
 elements.retry.addEventListener("click", () => {
@@ -395,5 +450,7 @@ elements.download.addEventListener("click", () => {
 
 bindDropZone(elements.personDropZone, (files) => { if (files[0]) setPerson(files[0]); });
 bindDropZone(elements.garmentDropZone, addGarments);
+bindDropZone(elements.poseDropZone, (files) => { if (files[0]) setPoseReference(files[0]); });
+syncPoseMode();
 updateButton();
 restorePendingJob().catch(() => {});

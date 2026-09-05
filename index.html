@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=5">
+    <link rel="stylesheet" href="styles.css?v=6">
   </head>
   <body>
     <header class="site-header">
@@ -97,24 +97,50 @@
             </div>
           </fieldset>
 
+          <fieldset class="pose-fieldset">
+            <legend>Pose</legend>
+            <div class="pose-options">
+              <label class="pose-option">
+                <input type="radio" name="poseMode" value="original" checked>
+                <span><strong>Original</strong><small>Keep source</small></span>
+              </label>
+              <label class="pose-option">
+                <input type="radio" name="poseMode" value="studio">
+                <span><strong>Studio</strong><small>Front-facing</small></span>
+              </label>
+              <label class="pose-option">
+                <input type="radio" name="poseMode" value="reference">
+                <span><strong>Reference</strong><small>Match a pose</small></span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="pose-reference-panel" id="poseReferencePanel" hidden>
+            <label class="pose-upload" id="poseDropZone">
+              <input id="poseInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+              <span class="pose-upload-empty" id="poseEmpty">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+                <span><strong>Add pose image</strong><small>Pose only · identity stays yours</small></span>
+              </span>
+              <span class="pose-preview" id="posePreview" hidden>
+                <img id="poseImage" alt="已选择的姿势参考图">
+                <span>Replace</span>
+              </span>
+            </label>
+            <div class="upload-feedback pose-feedback" id="poseFeedback" aria-live="polite">
+              <span class="feedback-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="m3 8.5 3 3 7-7"/></svg></span>
+              <span id="poseFeedbackText">Pose image required</span>
+            </div>
+          </div>
+
           <label class="direction-field">
             <span>Styling note <small>Optional</small></span>
             <textarea id="directionInput" maxlength="300" rows="3" placeholder="例如：把外套敞开穿，保留照片里的鞋子，整体偏日常松弛感。"></textarea>
           </label>
 
-          <div class="settings-row">
-            <label>
-              <span>Quality</span>
-              <select id="qualityInput">
-                <option value="low">快速</option>
-                <option value="medium" selected>标准</option>
-                <option value="high">精细</option>
-              </select>
-            </label>
-            <div class="format-note">
-              <span>Format</span>
-              <strong>Portrait · 1024 × 1536</strong>
-            </div>
+          <div class="format-note standalone-format">
+            <span>Format</span>
+            <strong>Portrait · 1024 × 1536</strong>
           </div>
 
           <label class="consent-row">
@@ -203,6 +229,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js?v=5" defer></script>
+    <script src="app.js?v=6" defer></script>
   </body>
 </html>

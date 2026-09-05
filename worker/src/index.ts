@@ -14,8 +14,8 @@ const JOB_PATTERN = /^job_[a-f0-9]{32}$/;
 const STORAGE_PREFIX_PATTERN = /^temporary\/lv-virtual-try-on\/[a-f0-9]{32}$/;
 const RESULT_KEY_PATTERN = /^temporary\/lv-virtual-try-on-results\/job_[a-f0-9]{32}(?:-[1-6])?\.(?:jpg|png|webp)$/;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const QUALITY_VALUES = new Set(["low", "medium", "high"]);
 const MODE_VALUES = new Set(["layered", "separate"]);
+const POSE_VALUES = new Set(["original", "studio", "reference"]);
 const PROCESSING_STATUSES = new Set(["submitted", "queued", "pending", "processing", "running"]);
 const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled"]);
 const SUCCEEDED_STATUSES = new Set(["succeeded", "success", "completed", "complete"]);
@@ -139,20 +139,24 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const input = await request.formData();
   const person = input.get("person");
   const garments = input.getAll("garments");
+  const poseReference = input.get("poseReference");
   const consent = stringValue(input.get("consent"));
   const direction = stringValue(input.get("direction")).slice(0, 300);
-  const qualityInput = stringValue(input.get("quality"));
-  const quality = QUALITY_VALUES.has(qualityInput) ? qualityInput : "medium";
   const modeInput = stringValue(input.get("mode"));
   const mode: TryOnMode = MODE_VALUES.has(modeInput) ? modeInput as TryOnMode : "separate";
+  const poseInput = stringValue(input.get("poseMode"));
+  const poseMode: PoseMode = POSE_VALUES.has(poseInput) ? poseInput as PoseMode : "original";
 
   if (consent !== "true") return json({ error: "请先确认已获得照片中人物的许可" }, 400, cors);
   if (!(person instanceof File)) return json({ error: "请先上传一张真人照片" }, 400, cors);
   if (!garments.length || garments.length > MAX_GARMENTS || garments.some((item) => !(item instanceof File))) {
     return json({ error: `请上传 1–${MAX_GARMENTS} 件衣服` }, 400, cors);
   }
+  if (poseMode === "reference" && !(poseReference instanceof File)) return json({ error: "请上传姿势参考图" }, 400, cors);
 
-  const imageFiles = [person, ...garments] as File[];
+  const garmentFiles = garments as File[];
+  const poseFile = poseMode === "reference" ? poseReference as File : null;
+  const imageFiles = [person, ...garmentFiles, ...(poseFile ? [poseFile] : [])];
   let totalBytes = 0;
   for (const file of imageFiles) {
     if (!ACCEPTED_TYPES.has(file.type)) return json({ error: "图片仅支持 JPG、PNG 或 WEBP" }, 415, cors);
@@ -178,12 +182,13 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
       type: "image" as const,
       url: `${trimTrailingSlash(env.R2_PUBLIC_BASE)}/${storagePrefix}/${index}.${extensions[index]}`
     }));
+    const poseReferenceItem = poseMode === "reference" ? references[garmentFiles.length + 1] : null;
     const generations: GenerationRequest[] = mode === "separate"
-      ? garments.map((_, index) => ({
-          prompt: buildSeparatePrompt(index + 1, garments.length, direction, quality),
-          references: [references[0], references[index + 1]]
+      ? garmentFiles.map((_, index) => ({
+          prompt: buildSeparatePrompt(index + 1, garmentFiles.length, direction, poseMode),
+          references: [references[0], references[index + 1], ...(poseReferenceItem ? [poseReferenceItem] : [])]
         }))
-      : [{ prompt: buildLayeredPrompt(garments.length, direction, quality), references }];
+      : [{ prompt: buildLayeredPrompt(garmentFiles.length, direction, poseMode), references }];
     await env.TRY_ON_WORKFLOW.create({
       id: jobId,
       params: {
@@ -323,7 +328,7 @@ async function getStoredImage(env: Env, key: string): Promise<Response | null> {
 }
 
 async function deleteTemporaryImages(env: Env, prefix: string, extensions: string[]): Promise<void> {
-  if (!STORAGE_PREFIX_PATTERN.test(prefix) || extensions.length < 1 || extensions.length > MAX_GARMENTS + 1 || extensions.some((extension) => !/^(?:jpg|png|webp)$/.test(extension))) return;
+  if (!STORAGE_PREFIX_PATTERN.test(prefix) || extensions.length < 1 || extensions.length > MAX_GARMENTS + 2 || extensions.some((extension) => !/^(?:jpg|png|webp)$/.test(extension))) return;
   await Promise.all(extensions.map(async (extension, index) => {
     try {
       const response = await storageClient(env).fetch(storageUrl(env, `${prefix}/${index}.${extension}`), { method: "DELETE" });
@@ -334,26 +339,33 @@ async function deleteTemporaryImages(env: Env, prefix: string, extensions: strin
   }));
 }
 
-function buildLayeredPrompt(garmentCount: number, direction: string, quality: string): string {
+function buildLayeredPrompt(garmentCount: number, direction: string, poseMode: PoseMode): string {
   const optionalDirection = direction ? `\nStyling direction from the user: ${direction}` : "";
-  const detail = quality === "high" ? "Prioritize maximum textile and construction detail." : quality === "low" ? "Prioritize a clean, fast fashion preview." : "Use balanced editorial detail.";
-  return `Create one photorealistic virtual try-on image. The FIRST reference image is the source person. The remaining ${garmentCount} reference image${garmentCount === 1 ? " is a garment" : "s are garments"} that must be worn together as one coherent outfit.
+  const poseReference = poseMode === "reference" ? ` Reference image ${garmentCount + 2} is a pose guide only.` : "";
+  return `Create one photorealistic virtual try-on image. The FIRST reference image is the source person. The next ${garmentCount} reference image${garmentCount === 1 ? " is a garment" : "s are garments"} that must be worn together as one coherent outfit.${poseReference}
 
-Preserve the source person's recognizable facial identity, hairstyle, skin tone, body proportions, pose, hands, camera angle, framing, and background. Change only the clothing needed for the outfit. Reproduce each referenced garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Layer garments in a physically plausible order. Render natural drape, folds, occlusion, lighting, shadows, and contact with the body. Keep original shoes and accessories unless a supplied garment clearly replaces them. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result must look like a real fashion photograph, not a collage or illustration. ${detail}${optionalDirection}`;
+Preserve the source person's recognizable facial identity, hairstyle, skin tone, and body proportions. ${poseInstruction(poseMode, garmentCount + 2)} Change only the clothing needed for the outfit. Reproduce each referenced garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Layer garments in a physically plausible order. Render maximum textile and construction detail with natural drape, folds, occlusion, lighting, shadows, and contact with the body. Keep original shoes and accessories unless a supplied garment clearly replaces them. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result must look like a real fashion photograph, not a collage or illustration.${optionalDirection}`;
 }
 
-function buildSeparatePrompt(pieceIndex: number, garmentCount: number, direction: string, quality: string): string {
+function buildSeparatePrompt(pieceIndex: number, garmentCount: number, direction: string, poseMode: PoseMode): string {
   const optionalDirection = direction ? `\nStyling direction from the user: ${direction}` : "";
-  const detail = quality === "high" ? "Prioritize maximum textile and construction detail." : quality === "low" ? "Prioritize a clean, fast fashion preview." : "Use balanced editorial detail.";
-  return `Create one photorealistic virtual try-on image for look ${pieceIndex} of ${garmentCount}. The FIRST reference image is the source person. The SECOND reference image is the only supplied garment to add to this look.
+  const poseReference = poseMode === "reference" ? " The THIRD reference image is a pose guide only." : "";
+  return `Create one photorealistic virtual try-on image for look ${pieceIndex} of ${garmentCount}. The FIRST reference image is the source person. The SECOND reference image is the only supplied garment to add to this look.${poseReference}
 
-Preserve the source person's recognizable facial identity, hairstyle, skin tone, body proportions, pose, hands, camera angle, framing, and background. Change only the clothing area needed to wear the single supplied garment. Do not combine it with garments from any other look. Reproduce the supplied garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Keep all compatible original clothing, shoes, and accessories unchanged. Render natural drape, folds, occlusion, lighting, shadows, and contact with the body. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result must look like a real fashion photograph, not a collage or illustration. ${detail}${optionalDirection}`;
+Preserve the source person's recognizable facial identity, hairstyle, skin tone, and body proportions. ${poseInstruction(poseMode, 3)} Change only the clothing area needed to wear the single supplied garment. Do not combine it with garments from any other look. Reproduce the supplied garment faithfully, including its silhouette, material, color, pattern, construction details, branding, and fit. Keep all compatible original clothing, shoes, and accessories unchanged. Render maximum textile and construction detail with natural drape, folds, occlusion, lighting, shadows, and contact with the body. Do not add unrelated garments, accessories, text, logos, watermarks, extra people, or extra limbs. The result must look like a real fashion photograph, not a collage or illustration.${optionalDirection}`;
+}
+
+function poseInstruction(mode: PoseMode, referenceNumber: number): string {
+  if (mode === "studio") return "Re-pose the person into a neutral front-facing fashion studio stance: balanced weight, relaxed shoulders, arms slightly away from the torso, and visible natural hands. Keep the original camera perspective, framing, lighting, and background as close as possible.";
+  if (mode === "reference") return `Match the body pose and limb placement from reference image ${referenceNumber}, but ignore that reference's identity, face, hair, body shape, clothing, background, and lighting. Apply only its pose to the source person while retaining the source person's identity and proportions.`;
+  return "Preserve the source person's original pose, hand placement, camera angle, framing, and background as exactly as possible.";
 }
 
 type ImageReference = { type: "image"; url: string };
 type GenerationRequest = { prompt: string; references: ImageReference[] };
 type StoredResult = { contentType: string; resultKey: string };
 type TryOnMode = "layered" | "separate";
+type PoseMode = "original" | "studio" | "reference";
 type TryOnWorkflowParams = { extensions: string[]; generations: GenerationRequest[]; jobId: string; mode: TryOnMode; storagePrefix: string };
 type TryOnWorkflowOutput =
   | { failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" }
