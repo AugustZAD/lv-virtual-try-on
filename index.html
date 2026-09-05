@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f4f0e9">
+    <meta name="description" content="上传真人照片和服装参考，用 GPT Image 2 生成自然、真实的试穿效果。">
+    <title>LV Fitting Room — AI 真人试穿</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#" aria-label="返回页面顶部">
+        <span class="brand-mark">LV</span>
+        <span class="brand-rule" aria-hidden="true"></span>
+        <span class="brand-name">Fitting Room</span>
+      </a>
+      <div class="model-pill" aria-label="当前模型">
+        <span class="status-dot" aria-hidden="true"></span>
+        GPT Image 2
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">AI VIRTUAL STYLING STUDIO</p>
+        <h1 id="page-title">把想穿的，<em>先穿上看看。</em></h1>
+        <p class="lede">一张真人照，加上一组衣服。保留你的样貌与姿态，生成自然可信的完整试穿效果。</p>
+      </section>
+
+      <section class="studio" aria-label="AI 试穿工作台">
+        <div class="input-panel">
+          <div class="panel-heading">
+            <span>01</span>
+            <div>
+              <h2>上传真人照</h2>
+              <p>全身或半身、光线清楚的照片效果最好</p>
+            </div>
+          </div>
+
+          <label class="upload-zone upload-person" id="personDropZone">
+            <input id="personInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+            <span class="upload-empty" id="personEmpty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+              <strong>选择或拖入真人照片</strong>
+              <small>JPG、PNG 或 WEBP · 最大 8 MB</small>
+            </span>
+            <span class="person-preview" id="personPreview" hidden>
+              <img id="personImage" alt="已选择的真人照片">
+              <span class="replace-chip">更换照片</span>
+            </span>
+          </label>
+
+          <div class="panel-heading garment-heading">
+            <span>02</span>
+            <div>
+              <h2>添加想试穿的衣服</h2>
+              <p>可一次加入上衣、下装、外套等，最多 6 件</p>
+            </div>
+            <span class="count-badge" id="garmentCount">0 / 6</span>
+          </div>
+
+          <div class="garment-grid" id="garmentGrid">
+            <label class="garment-add" id="garmentDropZone">
+              <input id="garmentInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              <span>添加衣服</span>
+            </label>
+          </div>
+
+          <label class="direction-field">
+            <span>穿搭方向 <small>选填</small></span>
+            <textarea id="directionInput" maxlength="300" rows="3" placeholder="例如：把外套敞开穿，保留照片里的鞋子，整体偏日常松弛感。"></textarea>
+          </label>
+
+          <div class="settings-row">
+            <label>
+              <span>画质</span>
+              <select id="qualityInput">
+                <option value="low">快速</option>
+                <option value="medium" selected>标准</option>
+                <option value="high">精细</option>
+              </select>
+            </label>
+            <div class="format-note">
+              <span>画幅</span>
+              <strong>竖版 · 1024 × 1536</strong>
+            </div>
+          </div>
+
+          <label class="consent-row">
+            <input id="consentInput" type="checkbox">
+            <span class="checkmark" aria-hidden="true">
+              <svg viewBox="0 0 16 16"><path d="m3 8.5 3 3 7-7"/></svg>
+            </span>
+            <span>我确认已获得照片中人物的许可，并同意将图片用于本次生成。</span>
+          </label>
+
+          <button class="generate-button" id="generateButton" type="button" disabled>
+            <span>生成试穿效果</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+          </button>
+          <p class="privacy-note">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 8V6.5a3.5 3.5 0 1 1 7 0V8m-8 0h9a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/></svg>
+            图片仅用于本次生成，不会保存到我们的服务器。
+          </p>
+        </div>
+
+        <div class="result-panel" id="resultPanel">
+          <div class="result-topline">
+            <span>03 · 试穿结果</span>
+            <span id="resultMeta">等待素材</span>
+          </div>
+
+          <div class="result-stage" id="resultStage">
+            <div class="result-empty" id="resultEmpty">
+              <div class="silhouette" aria-hidden="true">
+                <svg viewBox="0 0 220 300"><path d="M110 18c23 0 39 18 39 42 0 17-9 31-22 38 32 9 54 33 60 70l16 106H17l16-106c6-37 28-61 60-70-13-7-22-21-22-38 0-24 16-42 39-42Z"/></svg>
+              </div>
+              <p>你的造型会在这里出现</p>
+              <small>先在左侧添加真人照与至少一件衣服</small>
+            </div>
+
+            <div class="generating-state" id="generatingState" hidden>
+              <div class="scan-frame">
+                <div class="scan-line"></div>
+                <div class="generating-figure"></div>
+              </div>
+              <p id="generatingTitle">正在理解人物与衣服…</p>
+              <small>通常需要几十秒，请不要关闭页面</small>
+              <div class="progress-track"><span id="progressBar"></span></div>
+            </div>
+
+            <div class="result-ready" id="resultReady" hidden>
+              <img id="resultImage" alt="AI 生成的真人试穿效果">
+              <div class="result-actions">
+                <button id="downloadButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14"/></svg>
+                  下载图片
+                </button>
+                <button id="resetButton" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66L4 8.68M4 4v4.68h4.68"/></svg>
+                  重新搭配
+                </button>
+              </div>
+            </div>
+
+            <div class="error-state" id="errorState" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 4.2 2.8 17.3A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.7L13.7 4.2a2 2 0 0 0-3.4 0Z"/></svg>
+              <p id="errorMessage">生成遇到了一点问题</p>
+              <button id="retryButton" type="button">再试一次</button>
+            </div>
+          </div>
+
+          <div class="result-footnote">
+            <span>IMAGE-TO-IMAGE · HIGH FIDELITY</span>
+            <span>效果由 AI 生成，请以实物试穿为准</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>LV FITTING ROOM</span>
+      <span>Personal styling, reimagined.</span>
+    </footer>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
