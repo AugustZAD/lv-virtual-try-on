@@ -33,30 +33,34 @@ export default {
       return json({ background: "cloudflare-workflows", gateway: "mob-ai", model: MOB_AI_IMAGE_MODEL, service: "lv-virtual-try-on", status: "ok" }, 200);
     }
 
+    const resultMatch = request.method === "GET"
+      ? url.pathname.match(/^\/api\/try-on\/jobs\/(job_[a-f0-9]{32})\/results\/([1-6])$/)
+      : null;
     const cors = corsFor(request, env);
-    if (!cors) return json({ error: "Origin not allowed" }, 403);
-    if (!hasRequiredConfiguration(env)) return json({ error: "图像生成服务尚未配置" }, 503, cors);
+    // A regular cross-origin <img> request may omit Origin. Result IDs are
+    // unguessable and this route is read-only, so allow only that exact case.
+    const directImageRequest = Boolean(resultMatch && !request.headers.has("Origin"));
+    if (!cors && !directImageRequest) return json({ error: "Origin not allowed" }, 403);
+    const responseHeaders = cors ?? new Headers();
+    if (!hasRequiredConfiguration(env)) return json({ error: "图像生成服务尚未配置" }, 503, responseHeaders);
 
     try {
       if (request.method === "POST" && url.pathname === "/api/try-on") {
-        return await createTryOn(request, env, cors);
+        return await createTryOn(request, env, responseHeaders);
       }
-      const resultMatch = request.method === "GET"
-        ? url.pathname.match(/^\/api\/try-on\/jobs\/(job_[a-f0-9]{32})\/results\/([1-6])$/)
-        : null;
-      if (resultMatch) return await getTryOnResult(resultMatch[1], Number(resultMatch[2]), env, cors);
+      if (resultMatch) return await getTryOnResult(resultMatch[1], Number(resultMatch[2]), env, responseHeaders);
       const jobMatch = request.method === "GET"
         ? url.pathname.match(/^\/api\/try-on\/jobs\/(job_[a-f0-9]{32})$/)
         : null;
-      if (jobMatch) return await getTryOnJob(jobMatch[1], env, cors);
-      return json({ error: "Not found" }, 404, cors);
+      if (jobMatch) return await getTryOnJob(jobMatch[1], env, responseHeaders);
+      return json({ error: "Not found" }, 404, responseHeaders);
     } catch (error) {
       console.error(JSON.stringify({
         error: error instanceof Error ? error.message : String(error),
         event: "try_on_request_failed",
         requestId: request.headers.get("CF-Ray") || "unknown"
       }));
-      return json({ error: "服务暂时不可用，请稍后再试" }, 500, cors);
+      return json({ error: "服务暂时不可用，请稍后再试" }, 500, responseHeaders);
     }
   }
 } satisfies ExportedHandler<Env>;
