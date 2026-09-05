@@ -48,10 +48,12 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const input = await request.formData();
   const person = input.get("person");
   const garments = input.getAll("garments");
+  const consent = stringValue(input.get("consent"));
   const direction = stringValue(input.get("direction")).slice(0, 300);
   const qualityInput = stringValue(input.get("quality"));
   const quality = QUALITY_VALUES.has(qualityInput) ? qualityInput : "medium";
 
+  if (consent !== "true") return json({ error: "请先确认已获得照片中人物的许可" }, 400, cors);
   if (!(person instanceof File)) return json({ error: "请先上传一张真人照片" }, 400, cors);
   if (!garments.length || garments.length > MAX_GARMENTS || garments.some((item) => !(item instanceof File))) {
     return json({ error: `请上传 1–${MAX_GARMENTS} 件衣服` }, 400, cors);
@@ -65,6 +67,10 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
     totalBytes += file.size;
   }
   if (totalBytes > MAX_TOTAL_BYTES) return json({ error: "图片总大小不能超过 40 MB" }, 413, cors);
+
+  const rateKey = request.headers.get("CF-Connecting-IP") || "unknown";
+  const rateLimit = await env.TRY_ON_RATE_LIMITER.limit({ key: rateKey });
+  if (!rateLimit.success) return json({ error: "生成得有点频繁，请一分钟后再试" }, 429, cors);
 
   const openaiBody = new FormData();
   openaiBody.append("model", "gpt-image-2");

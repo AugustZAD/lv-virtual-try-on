@@ -163,6 +163,7 @@ async function generateTryOn() {
   const body = new FormData();
   body.append("person", personFile, personFile.name);
   garmentFiles.forEach((file) => body.append("garments", file, file.name));
+  body.append("consent", "true");
   body.append("direction", elements.direction.value.trim());
   body.append("quality", elements.quality.value);
 

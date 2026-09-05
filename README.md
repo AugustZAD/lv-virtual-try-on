@@ -5,7 +5,7 @@
 ## 架构
 
 - **GitHub Pages**：静态网页与本地图片预览。
-- **Cloudflare Worker**：校验上传内容并安全调用 OpenAI Images Edit API。
+- **Cloudflare Worker**：校验上传内容、限制生成频率，并安全调用 OpenAI Images Edit API。
 - **GPT Image 2**：以真人照为第一张高保真输入，其余图片作为一组服装参考。
 
 图片不会写入 KV、R2、数据库或日志。Worker 只在当前请求中转发图片，并把生成结果直接返回浏览器。
