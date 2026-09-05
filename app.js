@@ -2,6 +2,7 @@ const API_BASE = "https://lv-virtual-try-on.s98081096.workers.dev";
 const PUBLIC_APP_URL = "https://augustzad.github.io/lv-virtual-try-on/";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const EXTENSION_TYPES = new Map([["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"]]);
 const PENDING_JOB_KEY = "lv-fitting-pending-job";
@@ -62,12 +63,6 @@ let progressTimer = 0;
 let activeJobId = "";
 let resultTouchStart = null;
 
-function validateImage(file) {
-  if (!ACCEPTED_TYPES.has(file.type)) return "请使用 JPG、PNG 或 WEBP 图片";
-  if (file.size > MAX_FILE_BYTES) return "单张图片不能超过 8 MB";
-  return "";
-}
-
 function prepareImage(file) {
   if (file.size < 1) return { error: "This image is empty." };
   if (file.size > MAX_FILE_BYTES) return { error: "Image exceeds the 8 MB limit." };
@@ -122,6 +117,17 @@ function formReady() {
   return Boolean(personFile && garmentFiles.length > 0 && poseReady && elements.consent.checked);
 }
 
+function createJobId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `job_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function releaseResultUrls() {
+  resultUrls.forEach((url) => {
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  });
+}
+
 function showTemporaryError(message) {
   window.clearTimeout(showTemporaryError.timer);
   elements.resultMeta.textContent = message;
@@ -148,10 +154,13 @@ function setPerson(file) {
 
 function addGarments(files) {
   const incoming = [...files];
-  const valid = incoming.filter((file) => {
-    const error = validateImage(file);
-    if (error) showTemporaryError(error);
-    return !error;
+  const valid = incoming.flatMap((file) => {
+    const prepared = prepareImage(file);
+    if (prepared.error || !prepared.file) {
+      showTemporaryError(prepared.error || "Clothing image could not be added.");
+      return [];
+    }
+    return [prepared.file];
   });
   const available = MAX_GARMENTS - garmentFiles.length;
   if (valid.length > available) showTemporaryError(`一次最多添加 ${MAX_GARMENTS} 件衣服`);
@@ -252,7 +261,15 @@ async function generateTryOn() {
     elements.resultPanel.scrollIntoView({ behavior: "smooth", block: "center" });
     return;
   }
+  const totalBytes = personFile.size + garmentFiles.reduce((sum, file) => sum + file.size, 0) + (selectedPoseMode() === "reference" && poseFile ? poseFile.size : 0);
+  if (totalBytes > MAX_TOTAL_BYTES) {
+    showTemporaryError("图片总大小不能超过 40 MB");
+    return;
+  }
   elements.retry.textContent = "再试一次";
+  const jobId = createJobId();
+  activeJobId = jobId;
+  window.localStorage.setItem(PENDING_JOB_KEY, jobId);
   setView("generating");
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
@@ -267,19 +284,33 @@ async function generateTryOn() {
   body.append("direction", elements.direction.value.trim());
   body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "separate");
   body.append("poseMode", selectedPoseMode());
+  body.append("jobId", jobId);
   if (selectedPoseMode() === "reference" && poseFile) body.append("poseReference", poseFile, poseFile.name);
 
+  let accepted = false;
   try {
-    const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
-    if (!submitted.ok) throw new Error(await responseError(submitted));
+    const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", headers: { "X-Job-Id": jobId }, body });
+    if (!submitted.ok) {
+      clearPendingJob(jobId);
+      throw new Error(await responseError(submitted));
+    }
     const task = await submitted.json();
-    if (!JOB_ID_PATTERN.test(task.jobId) || task.status !== "processing") throw new Error("服务没有返回有效任务");
-    activeJobId = task.jobId;
-    window.localStorage.setItem(PENDING_JOB_KEY, activeJobId);
-    await finishBackgroundJob(activeJobId, Number(task.pollAfterMs) || 5000);
+    if (task.jobId !== jobId || task.status !== "processing") throw new Error("服务没有返回有效任务");
+    accepted = true;
+    await finishBackgroundJob(jobId, Number(task.pollAfterMs) || 5000);
   } catch (error) {
+    let failure = error;
+    if (!accepted && activeJobId === jobId) {
+      elements.generatingTitle.textContent = "Confirming your background task…";
+      try {
+        await finishBackgroundJob(jobId, 1500);
+        return;
+      } catch (recoveryError) {
+        failure = recoveryError;
+      }
+    }
     stopProgress();
-    elements.errorMessage.textContent = error instanceof Error ? error.message : "生成失败，请稍后再试";
+    elements.errorMessage.textContent = failure instanceof Error ? failure.message : "生成失败，请稍后再试";
     setView("error");
     elements.resultMeta.textContent = "Not completed";
   } finally {
@@ -299,15 +330,13 @@ async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
     clearPendingJob(jobId);
     throw new Error("服务没有返回有效结果");
   }
-  const blobs = await Promise.all(completed.results.map(async (result) => {
-    const resultResponse = await fetch(`${API_BASE}${result.url}`);
-    if (!resultResponse.ok) throw new Error(await responseError(resultResponse));
-    const blob = await resultResponse.blob();
-    if (!blob.type.startsWith("image/")) throw new Error("服务没有返回有效图片");
-    return blob;
-  }));
-  resultUrls.forEach((url) => URL.revokeObjectURL(url));
-  resultUrls = blobs.map((blob) => URL.createObjectURL(blob));
+  const expectedPath = new RegExp(`^/api/try-on/jobs/${jobId}/results/[1-6]$`);
+  if (completed.results.some((result) => typeof result.url !== "string" || !expectedPath.test(result.url))) {
+    clearPendingJob(jobId);
+    throw new Error("服务没有返回有效结果地址");
+  }
+  releaseResultUrls();
+  resultUrls = completed.results.map((result) => `${API_BASE}${result.url}`);
   activeResultIndex = 0;
   renderActiveResult();
   clearPendingJob(jobId);
@@ -340,9 +369,13 @@ async function waitForBackgroundJob(jobId, initialPollAfterMs) {
     try {
       response = await fetch(`${API_BASE}/api/try-on/jobs/${encodeURIComponent(jobId)}`);
     } catch {
+      elements.generatingNote.textContent = navigator.onLine
+        ? "Connection interrupted. Your task is still running."
+        : "You’re offline. Your task is still running in the background.";
       pollAfterMs = 10000;
       continue;
     }
+    elements.generatingNote.textContent = "You can close this page. We’ll restore it when you return.";
     if (response.status !== 202) return response;
     const progress = await response.json();
     pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
@@ -440,12 +473,25 @@ elements.resultImage.addEventListener("touchend", (event) => {
   activeResultIndex += deltaX < 0 ? 1 : -1;
   renderActiveResult();
 }, { passive: true });
-elements.download.addEventListener("click", () => {
+elements.download.addEventListener("click", async () => {
   if (!resultUrls[activeResultIndex]) return;
-  const link = document.createElement("a");
-  link.href = resultUrls[activeResultIndex];
-  link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}-look-${activeResultIndex + 1}.png`;
-  link.click();
+  elements.download.disabled = true;
+  try {
+    const response = await fetch(resultUrls[activeResultIndex]);
+    if (!response.ok) throw new Error(await responseError(response));
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("服务没有返回有效图片");
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `lv-fitting-${new Date().toISOString().slice(0, 10)}-look-${activeResultIndex + 1}.png`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (error) {
+    showTemporaryError(error instanceof Error ? error.message : "下载失败，请稍后再试");
+  } finally {
+    elements.download.disabled = false;
+  }
 });
 
 bindDropZone(elements.personDropZone, (files) => { if (files[0]) setPerson(files[0]); });

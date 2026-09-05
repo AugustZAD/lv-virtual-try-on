@@ -11,6 +11,16 @@
       "binding": "TRY_ON_WORKFLOW",
       "name": "lv-virtual-try-on-generation",
       "class_name": "TryOnWorkflow"
+    },
+    {
+      "binding": "TRY_ON_BATCH_WORKFLOW",
+      "name": "lv-virtual-try-on-batch-v2",
+      "class_name": "TryOnBatchWorkflow"
+    },
+    {
+      "binding": "TRY_ON_LOOK_WORKFLOW",
+      "name": "lv-virtual-try-on-look-v2",
+      "class_name": "TryOnLookWorkflow"
     }
   ],
   "vars": {

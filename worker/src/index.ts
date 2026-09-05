@@ -6,7 +6,10 @@ const MOB_AI_IMAGE_MODEL = "image-gpt";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
+const MAX_RESULT_BYTES = 20 * 1024 * 1024;
 const MAX_POLLS_PER_RESULT = 140;
+const MAX_LOOK_POLLS = 36;
+const MAX_BATCH_POLLS = 80;
 const UPLOAD_PREFIX = "temporary/lv-virtual-try-on";
 const RESULT_PREFIX = "temporary/lv-virtual-try-on-results";
 const LOCAL_ORIGIN_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
@@ -19,6 +22,8 @@ const POSE_VALUES = new Set(["original", "studio", "reference"]);
 const PROCESSING_STATUSES = new Set(["submitted", "queued", "pending", "processing", "running"]);
 const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled"]);
 const SUCCEEDED_STATUSES = new Set(["succeeded", "success", "completed", "complete"]);
+const LOOK_FAILURE_REASONS = new Set(["gateway_auth", "internal_error", "invalid_output", "provider_failed", "provider_timeout"]);
+const TRUSTED_OUTPUT_HOSTS = new Set(["fc-gw-sh.oss-accelerate.aliyuncs.com"]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -130,11 +135,168 @@ export class TryOnWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowParams> 
   }
 }
 
+export class TryOnBatchWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowParams> {
+  async run(event: WorkflowEvent<TryOnWorkflowParams>, step: WorkflowStep): Promise<TryOnWorkflowOutput> {
+    const params = event.payload;
+    const childIds = params.generations.map((_, index) => `${event.instanceId}-look-${index + 1}`);
+    try {
+      await step.do("start independent look workflows", {
+        retries: { limit: 4, delay: "3 seconds", backoff: "exponential" },
+        timeout: "1 minute"
+      }, async () => {
+        await this.env.TRY_ON_LOOK_WORKFLOW.createBatch(params.generations.map((generation, index) => ({
+          id: childIds[index],
+          params: { generation, jobId: params.jobId, resultIndex: index + 1 },
+          retention: { errorRetention: "3 days", successRetention: "3 days" }
+        })));
+        return { childIds };
+      });
+
+      const results: Array<StoredResult | undefined> = new Array(childIds.length);
+      const finished = new Array(childIds.length).fill(false) as boolean[];
+      let failedCount = 0;
+      for (let pollIndex = 0; pollIndex < MAX_BATCH_POLLS && finished.some((value) => !value); pollIndex += 1) {
+        await step.sleep(`wait for look workflows round ${pollIndex + 1}`, "10 seconds");
+        for (const [resultIndex, childId] of childIds.entries()) {
+          if (finished[resultIndex]) continue;
+          const status = await step.do(`check look workflow ${resultIndex + 1}-${pollIndex + 1}`, {
+            retries: { limit: 0, delay: "1 second", backoff: "constant" },
+            timeout: "1 minute"
+          }, async (): Promise<LookStatusSnapshot> => {
+            try {
+              const observed = await (await this.env.TRY_ON_LOOK_WORKFLOW.get(childId)).status();
+              return { output: parseLookWorkflowOutput(observed.output), status: observed.status };
+            } catch {
+              return { output: null, status: "unknown" };
+            }
+          });
+          if (["queued", "running", "waiting", "waitingForPause", "paused", "unknown"].includes(status.status)) continue;
+          finished[resultIndex] = true;
+          if (status.status !== "complete") {
+            failedCount += 1;
+            continue;
+          }
+          const output = status.output;
+          if (!output || output.status === "failed") {
+            failedCount += 1;
+            continue;
+          }
+          results[resultIndex] = output.result;
+        }
+      }
+      failedCount += finished.filter((value) => !value).length;
+
+      await step.do("remove completed source images", {
+        retries: { limit: 4, delay: "3 seconds", backoff: "exponential" },
+        timeout: "2 minutes"
+      }, async () => deleteTemporaryImages(this.env, params.storagePrefix, params.extensions));
+      const completedResults = results.filter((result): result is StoredResult => Boolean(result));
+      console.log(JSON.stringify({
+        event: "try_on_batch_completed",
+        failedCount,
+        resultCount: completedResults.length,
+        workflowId: event.instanceId
+      }));
+      if (!completedResults.length) {
+        return { message: "这组图片没能生成结果，请换用更清晰、无遮挡的照片再试", status: "failed" };
+      }
+      return { failedCount, mode: params.mode, results: completedResults, status: "succeeded" };
+    } catch (error) {
+      // Already-started child workflows may still need the references. The bucket lifecycle
+      // policy remains the cleanup fallback if batch orchestration is interrupted.
+      console.error(JSON.stringify({
+        error: error instanceof Error ? error.message : String(error),
+        event: "try_on_batch_failed",
+        workflowId: event.instanceId
+      }));
+      return { message: "后台任务暂时中断，请稍后再试", status: "failed" };
+    }
+  }
+}
+
+export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflowParams> {
+  async run(event: WorkflowEvent<TryOnLookWorkflowParams>, step: WorkflowStep): Promise<TryOnLookWorkflowOutput> {
+    const { generation, jobId, resultIndex } = event.payload;
+    try {
+      // Do not retry submission: an ambiguous network failure must not create a duplicate paid task.
+      const submission = await step.do("submit Mob AI generation", {
+        retries: { limit: 0, delay: "1 second", backoff: "constant" },
+        timeout: "1 minute"
+      }, async () => {
+        const response = await mobPost(this.env, {
+          model: MOB_AI_IMAGE_MODEL,
+          mode: "async",
+          input: { aspectRatio: "2:3", prompt: generation.prompt, references: generation.references }
+        });
+        const taskId = response.task?.id ?? response.result?.taskId;
+        if (!taskId || taskId.length > 300) throw new Error("Mob AI submit response omitted task id");
+        return { taskId };
+      });
+
+      for (let pollIndex = 0; pollIndex < MAX_LOOK_POLLS; pollIndex += 1) {
+        await step.sleep(`wait for Mob AI round ${pollIndex + 1}`, lookPollDelay(pollIndex));
+        const check = await step.do(`check Mob AI generation ${pollIndex + 1}`, {
+          retries: { limit: 0, delay: "1 second", backoff: "constant" },
+          timeout: "1 minute"
+        }, async (): Promise<MobPollResult> => {
+          try {
+            return { kind: "response", response: await mobPost(this.env, {
+              model: MOB_AI_IMAGE_MODEL,
+              mode: "async",
+              input: { taskId: submission.taskId }
+            }) };
+          } catch (error) {
+            const status = error instanceof MobRequestError ? error.status : 0;
+            return { kind: status === 401 || status === 403 ? "fatal" : "transient" };
+          }
+        });
+        if (check.kind === "transient") continue;
+        if (check.kind === "fatal") return lookFailure("gateway_auth", event.instanceId, resultIndex);
+
+        const response = check.response;
+        const status = normalizedMobStatus(response);
+        const outputUrl = mobOutputUrl(response);
+        if (PROCESSING_STATUSES.has(status) || (!status && !outputUrl)) continue;
+        if (FAILED_STATUSES.has(status)) return lookFailure("provider_failed", event.instanceId, resultIndex);
+        if (!SUCCEEDED_STATUSES.has(status) && !outputUrl) continue;
+        if (!outputUrl || !isSafeHttpsUrl(outputUrl)) return lookFailure("invalid_output", event.instanceId, resultIndex);
+
+        const result = await step.do("store completed image", {
+          retries: { limit: 2, delay: "3 seconds", backoff: "exponential" },
+          timeout: "2 minutes"
+        }, async () => storeCompletedImage(this.env, jobId, resultIndex, outputUrl));
+        console.log(JSON.stringify({ event: "try_on_look_completed", resultIndex, workflowId: event.instanceId }));
+        return { result, status: "succeeded" };
+      }
+      return lookFailure("provider_timeout", event.instanceId, resultIndex);
+    } catch (error) {
+      console.error(JSON.stringify({
+        error: error instanceof Error ? error.message : String(error),
+        event: "try_on_look_failed",
+        resultIndex,
+        workflowId: event.instanceId
+      }));
+      return { reason: "internal_error", status: "failed" };
+    }
+  }
+}
+
 async function createTryOn(request: Request, env: Env, cors: Headers): Promise<Response> {
   const contentType = request.headers.get("Content-Type") || "";
   if (!contentType.startsWith("multipart/form-data")) return json({ error: "请上传真人照和服装图片" }, 415, cors);
   const contentLength = Number(request.headers.get("Content-Length"));
   if (Number.isFinite(contentLength) && contentLength > MAX_TOTAL_BYTES) return json({ error: "图片总大小不能超过 40 MB" }, 413, cors);
+
+  const requestedJobId = (request.headers.get("X-Job-Id") || "").trim();
+  if (requestedJobId && !JOB_PATTERN.test(requestedJobId)) return json({ error: "任务编号无效，请刷新页面后再试" }, 400, cors);
+  const jobId = requestedJobId || `job_${randomHex(16)}`;
+  if (requestedJobId && await workflowExists(env.TRY_ON_BATCH_WORKFLOW, jobId)) {
+    return json({ background: true, jobId, pollAfterMs: 1500, status: "processing" }, 202, cors);
+  }
+
+  const rateKey = request.headers.get("CF-Connecting-IP") || "unknown";
+  const rateLimit = await env.TRY_ON_RATE_LIMITER.limit({ key: rateKey });
+  if (!rateLimit.success) return json({ error: "生成得有点频繁，请一分钟后再试" }, 429, cors);
 
   const input = await request.formData();
   const person = input.get("person");
@@ -146,6 +308,7 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const mode: TryOnMode = MODE_VALUES.has(modeInput) ? modeInput as TryOnMode : "separate";
   const poseInput = stringValue(input.get("poseMode"));
   const poseMode: PoseMode = POSE_VALUES.has(poseInput) ? poseInput as PoseMode : "original";
+  const formJobId = stringValue(input.get("jobId"));
 
   if (consent !== "true") return json({ error: "请先确认已获得照片中人物的许可" }, 400, cors);
   if (!(person instanceof File)) return json({ error: "请先上传一张真人照片" }, 400, cors);
@@ -161,15 +324,12 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   for (const file of imageFiles) {
     if (!ACCEPTED_TYPES.has(file.type)) return json({ error: "图片仅支持 JPG、PNG 或 WEBP" }, 415, cors);
     if (file.size < 1 || file.size > MAX_FILE_BYTES) return json({ error: "单张图片不能超过 8 MB" }, 413, cors);
+    if (!await hasValidImageSignature(file)) return json({ error: "有图片内容损坏或格式不正确，请重新选择" }, 415, cors);
     totalBytes += file.size;
   }
   if (totalBytes > MAX_TOTAL_BYTES) return json({ error: "图片总大小不能超过 40 MB" }, 413, cors);
+  if (formJobId && formJobId !== jobId) return json({ error: "任务编号不一致，请刷新页面后再试" }, 400, cors);
 
-  const rateKey = request.headers.get("CF-Connecting-IP") || "unknown";
-  const rateLimit = await env.TRY_ON_RATE_LIMITER.limit({ key: rateKey });
-  if (!rateLimit.success) return json({ error: "生成得有点频繁，请一分钟后再试" }, 429, cors);
-
-  const jobId = `job_${randomHex(16)}`;
   const storagePrefix = `${UPLOAD_PREFIX}/${randomHex(16)}`;
   const extensions = imageFiles.map((file) => imageExtension(file.type));
   let uploadedCount = 0;
@@ -189,7 +349,7 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
           references: [references[0], references[index + 1], ...(poseReferenceItem ? [poseReferenceItem] : [])]
         }))
       : [{ prompt: buildLayeredPrompt(garmentFiles.length, direction, poseMode), references }];
-    await env.TRY_ON_WORKFLOW.create({
+    await env.TRY_ON_BATCH_WORKFLOW.create({
       id: jobId,
       params: {
         extensions,
@@ -211,10 +371,11 @@ async function getTryOnJob(jobId: string, env: Env, cors: Headers): Promise<Resp
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
   let workflowStatus: InstanceStatus;
   try {
-    workflowStatus = await (await env.TRY_ON_WORKFLOW.get(jobId)).status();
+    workflowStatus = await getJobWorkflowStatus(env, jobId);
   } catch {
     return json({ error: "生成任务无效或已过期" }, 404, cors);
   }
+  if (workflowStatus.status === "unknown") return json({ error: "生成任务无效或已过期" }, 404, cors);
   if (["queued", "running", "waiting", "waitingForPause", "paused"].includes(workflowStatus.status)) {
     return json({ background: true, jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
   }
@@ -239,10 +400,11 @@ async function getTryOnResult(jobId: string, resultIndex: number, env: Env, cors
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
   let workflowStatus: InstanceStatus;
   try {
-    workflowStatus = await (await env.TRY_ON_WORKFLOW.get(jobId)).status();
+    workflowStatus = await getJobWorkflowStatus(env, jobId);
   } catch {
     return json({ error: "生成任务无效或已过期" }, 404, cors);
   }
+  if (workflowStatus.status === "unknown") return json({ error: "生成任务无效或已过期" }, 404, cors);
   if (workflowStatus.status !== "complete") return json({ error: "结果尚未生成" }, 409, cors);
   const output = parseWorkflowOutput(workflowStatus.output);
   if (!output || output.status === "failed") return json({ error: output?.message || "后台任务未能完成，请重新提交" }, 502, cors);
@@ -267,7 +429,7 @@ async function mobPost(env: Env, body: Record<string, unknown>): Promise<MobResp
   if (!response.ok) {
     const detail = await readMobError(response);
     console.error(JSON.stringify({ event: "mob_ai_image_failed", message: detail, status: response.status }));
-    throw new Error(`Mob AI request failed: ${response.status}${detail ? ` ${detail}` : ""}`);
+    throw new MobRequestError(response.status, `Mob AI request failed: ${response.status}${detail ? ` ${detail}` : ""}`);
   }
   const value = await response.json<unknown>();
   if (!value || typeof value !== "object") throw new Error("Mob AI returned malformed JSON");
@@ -305,15 +467,18 @@ async function putTemporaryImage(env: Env, key: string, file: File): Promise<voi
 
 async function storeCompletedImage(env: Env, jobId: string, resultIndex: number, outputUrl: string): Promise<StoredResult> {
   if (!JOB_PATTERN.test(jobId)) throw new Error("Invalid workflow job id");
-  const output = await fetch(outputUrl, { redirect: "follow" });
+  const output = await fetchTrustedImage(outputUrl);
   if (!output.ok) throw new Error(`Mob AI image download failed: ${output.status}`);
-  const contentType = output.headers.get("Content-Type") || "image/png";
+  const outputLength = Number(output.headers.get("Content-Length"));
+  if (Number.isFinite(outputLength) && outputLength > MAX_RESULT_BYTES) throw new Error("Mob AI output exceeded the size limit");
+  const contentType = (output.headers.get("Content-Type") || "image/png").split(";", 1)[0].trim().toLowerCase();
   if (!ACCEPTED_TYPES.has(contentType)) throw new Error("Mob AI output was not a supported image");
+  const outputBytes = await readBodyWithLimit(output, MAX_RESULT_BYTES);
   const resultKey = `${RESULT_PREFIX}/${jobId}-${resultIndex}.${imageExtension(contentType)}`;
   const response = await storageClient(env).fetch(storageUrl(env, resultKey), {
     method: "PUT",
     headers: { "Cache-Control": "private, no-store", "Content-Type": contentType },
-    body: await output.arrayBuffer()
+    body: outputBytes
   });
   if (!response.ok) throw new Error(`Completed image storage failed: ${response.status}`);
   return { contentType, resultKey };
@@ -329,14 +494,14 @@ async function getStoredImage(env: Env, key: string): Promise<Response | null> {
 
 async function deleteTemporaryImages(env: Env, prefix: string, extensions: string[]): Promise<void> {
   if (!STORAGE_PREFIX_PATTERN.test(prefix) || extensions.length < 1 || extensions.length > MAX_GARMENTS + 2 || extensions.some((extension) => !/^(?:jpg|png|webp)$/.test(extension))) return;
-  await Promise.all(extensions.map(async (extension, index) => {
+  for (const [index, extension] of extensions.entries()) {
     try {
       const response = await storageClient(env).fetch(storageUrl(env, `${prefix}/${index}.${extension}`), { method: "DELETE" });
       if (!response.ok && response.status !== 404) console.error(JSON.stringify({ event: "temporary_image_delete_failed", status: response.status }));
     } catch (error) {
       console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error), event: "temporary_image_delete_failed" }));
     }
-  }));
+  }
 }
 
 function buildLayeredPrompt(garmentCount: number, direction: string, poseMode: PoseMode): string {
@@ -367,9 +532,19 @@ type StoredResult = { contentType: string; resultKey: string };
 type TryOnMode = "layered" | "separate";
 type PoseMode = "original" | "studio" | "reference";
 type TryOnWorkflowParams = { extensions: string[]; generations: GenerationRequest[]; jobId: string; mode: TryOnMode; storagePrefix: string };
+type TryOnLookWorkflowParams = { generation: GenerationRequest; jobId: string; resultIndex: number };
 type TryOnWorkflowOutput =
   | { failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" }
   | { message: string; status: "failed" };
+type TryOnLookWorkflowOutput =
+  | { result: StoredResult; status: "succeeded" }
+  | { reason: LookFailureReason; status: "failed" };
+type LookFailureReason = "gateway_auth" | "internal_error" | "invalid_output" | "provider_failed" | "provider_timeout";
+type MobPollResult =
+  | { kind: "response"; response: MobResponse }
+  | { kind: "fatal" }
+  | { kind: "transient" };
+type LookStatusSnapshot = { output: TryOnLookWorkflowOutput | null; status: InstanceStatus["status"] };
 type MobResponse = {
   status?: string;
   task?: { id?: string; providerStatus?: string; status?: string };
@@ -381,6 +556,110 @@ type MobResponse = {
 function normalizedMobStatus(response: MobResponse): string {
   const candidates = [response.status, response.task?.providerStatus, response.task?.status, response.result?.status];
   return candidates.find((value) => typeof value === "string" && (PROCESSING_STATUSES.has(value.toLowerCase()) || FAILED_STATUSES.has(value.toLowerCase()) || SUCCEEDED_STATUSES.has(value.toLowerCase())))?.toLowerCase() || "";
+}
+
+class MobRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "MobRequestError";
+  }
+}
+
+function mobOutputUrl(response: MobResponse): string {
+  return response.output?.url ?? response.result?.imageUrl ?? response.result?.url ?? response.images?.[0]?.url ?? "";
+}
+
+function isSafeHttpsUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && (url.hostname === "mob-ai.cn" || url.hostname.endsWith(".mob-ai.cn") || TRUSTED_OUTPUT_HOSTS.has(url.hostname));
+  } catch {
+    return false;
+  }
+}
+
+async function fetchTrustedImage(value: string): Promise<Response> {
+  let current = value;
+  for (let redirects = 0; redirects <= 2; redirects += 1) {
+    if (!isSafeHttpsUrl(current)) throw new Error("Mob AI output used an untrusted URL");
+    const response = await fetch(current, { redirect: "manual" });
+    if (response.status < 300 || response.status >= 400) return response;
+    const location = response.headers.get("Location");
+    if (!location || redirects === 2) throw new Error("Mob AI output redirected too many times");
+    current = new URL(location, current).toString();
+  }
+  throw new Error("Mob AI output redirect failed");
+}
+
+async function readBodyWithLimit(response: Response, limit: number): Promise<ArrayBuffer> {
+  if (!response.body) throw new Error("Mob AI output omitted the image body");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel("output too large");
+      throw new Error("Mob AI output exceeded the size limit");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
+}
+
+async function hasValidImageSignature(file: File): Promise<boolean> {
+  const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (file.type === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (file.type === "image/png") return bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+  return bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP";
+}
+
+function lookPollDelay(pollIndex: number): "5 seconds" | "10 seconds" | "25 seconds" {
+  if (pollIndex < 6) return "5 seconds";
+  if (pollIndex < 18) return "10 seconds";
+  return "25 seconds";
+}
+
+function lookFailure(reason: LookFailureReason, workflowId: string, resultIndex: number): TryOnLookWorkflowOutput {
+  console.error(JSON.stringify({ event: "try_on_look_failed", reason, resultIndex, workflowId }));
+  return { reason, status: "failed" };
+}
+
+function parseLookWorkflowOutput(value: unknown): TryOnLookWorkflowOutput | null {
+  if (!value || typeof value !== "object" || !("status" in value)) return null;
+  const output = value as Partial<TryOnLookWorkflowOutput>;
+  if (output.status === "failed" && typeof output.reason === "string" && LOOK_FAILURE_REASONS.has(output.reason)) {
+    return { reason: output.reason as LookFailureReason, status: "failed" };
+  }
+  if (output.status === "succeeded" && output.result && typeof output.result.resultKey === "string" && RESULT_KEY_PATTERN.test(output.result.resultKey) && typeof output.result.contentType === "string" && ACCEPTED_TYPES.has(output.result.contentType)) {
+    return { result: output.result, status: "succeeded" };
+  }
+  return null;
+}
+
+async function workflowExists(workflow: Workflow, jobId: string): Promise<boolean> {
+  try {
+    const status = await (await workflow.get(jobId)).status();
+    return status.status !== "unknown";
+  } catch {
+    return false;
+  }
+}
+
+async function getJobWorkflowStatus(env: Env, jobId: string): Promise<InstanceStatus> {
+  try {
+    const current = await (await env.TRY_ON_BATCH_WORKFLOW.get(jobId)).status();
+    if (current.status !== "unknown") return current;
+  } catch {}
+  return (await env.TRY_ON_WORKFLOW.get(jobId)).status();
 }
 
 function parseWorkflowOutput(value: unknown): TryOnWorkflowOutput | null {
@@ -421,7 +700,7 @@ function stringValue(value: string | File | null): string {
 }
 
 function hasRequiredConfiguration(env: Env): boolean {
-  return Boolean(env.MOB_AI_API_KEY && env.TRY_ON_WORKFLOW && env.R2_ENDPOINT && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET && env.R2_PUBLIC_BASE);
+  return Boolean(env.MOB_AI_API_KEY && env.TRY_ON_WORKFLOW && env.TRY_ON_BATCH_WORKFLOW && env.TRY_ON_LOOK_WORKFLOW && env.R2_ENDPOINT && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET && env.R2_PUBLIC_BASE);
 }
 
 function corsFor(request: Request, env: Env): Headers | null {
@@ -429,7 +708,7 @@ function corsFor(request: Request, env: Env): Headers | null {
   const allowed = origin === env.ALLOWED_ORIGIN || (origin !== null && LOCAL_ORIGIN_PATTERN.test(origin));
   if (!origin || !allowed) return null;
   return new Headers({
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Job-Id",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Max-Age": "86400",
