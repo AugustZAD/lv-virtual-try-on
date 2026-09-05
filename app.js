@@ -3,6 +3,7 @@ const PUBLIC_APP_URL = "https://augustzad.github.io/lv-virtual-try-on/";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const EXTENSION_TYPES = new Map([["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"]]);
 const PENDING_JOB_KEY = "lv-fitting-pending-job";
 const JOB_ID_PATTERN = /^job_[a-f0-9]{32}$/;
 
@@ -22,6 +23,8 @@ const elements = {
   generatingTitle: document.querySelector("#generatingTitle"),
   personDropZone: document.querySelector("#personDropZone"),
   personEmpty: document.querySelector("#personEmpty"),
+  personFeedback: document.querySelector("#personFeedback"),
+  personFeedbackText: document.querySelector("#personFeedbackText"),
   personImage: document.querySelector("#personImage"),
   personInput: document.querySelector("#personInput"),
   personPreview: document.querySelector("#personPreview"),
@@ -56,6 +59,22 @@ function validateImage(file) {
   return "";
 }
 
+function prepareImage(file) {
+  if (file.size < 1) return { error: "This image is empty." };
+  if (file.size > MAX_FILE_BYTES) return { error: "Image exceeds the 8 MB limit." };
+  if (ACCEPTED_TYPES.has(file.type)) return { file };
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  const inferredType = EXTENSION_TYPES.get(extension);
+  if (!inferredType) return { error: "Use a JPG, PNG or WEBP image." };
+  return { file: new File([file], file.name, { lastModified: file.lastModified, type: inferredType }) };
+}
+
+function setPersonFeedback(state, message) {
+  elements.personFeedback.classList.toggle("is-success", state === "success");
+  elements.personFeedback.classList.toggle("is-error", state === "error");
+  elements.personFeedbackText.textContent = message;
+}
+
 function showTemporaryError(message) {
   window.clearTimeout(showTemporaryError.timer);
   elements.resultMeta.textContent = message;
@@ -63,14 +82,20 @@ function showTemporaryError(message) {
 }
 
 function setPerson(file) {
-  const error = validateImage(file);
-  if (error) return showTemporaryError(error);
+  const prepared = prepareImage(file);
+  if (prepared.error || !prepared.file) {
+    setPersonFeedback("error", prepared.error || "Photo could not be added.");
+    elements.personDropZone.classList.toggle("has-file", Boolean(personFile));
+    return;
+  }
   if (personUrl) URL.revokeObjectURL(personUrl);
-  personFile = file;
-  personUrl = URL.createObjectURL(file);
+  personFile = prepared.file;
+  personUrl = URL.createObjectURL(prepared.file);
   elements.personImage.src = personUrl;
   elements.personEmpty.hidden = true;
   elements.personPreview.hidden = false;
+  elements.personDropZone.classList.add("has-file");
+  setPersonFeedback("success", `Photo added · ${prepared.file.name}`);
   updateButton();
 }
 
