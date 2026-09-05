@@ -2,6 +2,8 @@ const API_BASE = "https://lv-virtual-try-on.s98081096.workers.dev";
 const MAX_GARMENTS = 6;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const PENDING_JOB_KEY = "lv-fitting-pending-job";
+const JOB_ID_PATTERN = /^job_[a-f0-9]{32}$/;
 
 const elements = {
   consent: document.querySelector("#consentInput"),
@@ -15,6 +17,7 @@ const elements = {
   garmentInput: document.querySelector("#garmentInput"),
   generate: document.querySelector("#generateButton"),
   generating: document.querySelector("#generatingState"),
+  generatingNote: document.querySelector("#generatingNote"),
   generatingTitle: document.querySelector("#generatingTitle"),
   personDropZone: document.querySelector("#personDropZone"),
   personEmpty: document.querySelector("#personEmpty"),
@@ -38,6 +41,7 @@ let garmentFiles = [];
 let garmentUrls = [];
 let resultUrl = "";
 let progressTimer = 0;
+let activeJobId = "";
 
 function validateImage(file) {
   if (!ACCEPTED_TYPES.has(file.type)) return "请使用 JPG、PNG 或 WEBP 图片";
@@ -101,6 +105,11 @@ function renderGarments() {
 }
 
 function updateButton() {
+  if (activeJobId) {
+    elements.generate.disabled = true;
+    elements.resultMeta.textContent = "Background task";
+    return;
+  }
   const ready = personFile && garmentFiles.length > 0 && elements.consent.checked;
   elements.generate.disabled = !ready;
   if (!personFile) elements.resultMeta.textContent = "Add a photo";
@@ -128,15 +137,17 @@ function setView(view) {
   elements.error.hidden = view !== "error";
 }
 
-function startProgress() {
+function startProgress(restored = false) {
   const messages = [
-    "Reading your references…",
+    restored ? "Restoring your background task…" : "Reading your references…",
     "Rebuilding fabric and form…",
     "Refining folds and light…",
-    "Finishing your look…"
+    "Working in the background…"
   ];
   let progress = 10;
   let message = 0;
+  elements.generatingTitle.textContent = messages[0];
+  elements.generatingNote.textContent = "You can close this page. We’ll restore it when you return.";
   elements.progress.style.width = `${progress}%`;
   progressTimer = window.setInterval(() => {
     progress = Math.min(92, progress + Math.max(1, Math.round((94 - progress) * 0.09)));
@@ -152,7 +163,7 @@ function stopProgress(complete = false) {
 }
 
 async function generateTryOn() {
-  if (!personFile || !garmentFiles.length || !elements.consent.checked) return;
+  if (activeJobId || !personFile || !garmentFiles.length || !elements.consent.checked) return;
   setView("generating");
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
@@ -171,26 +182,10 @@ async function generateTryOn() {
     const submitted = await fetch(`${API_BASE}/api/try-on`, { method: "POST", body });
     if (!submitted.ok) throw new Error(await responseError(submitted));
     const task = await submitted.json();
-    if (!task.jobId || task.status !== "processing") throw new Error("服务没有返回有效任务");
-
-    let response;
-    let pollAfterMs = Number(task.pollAfterMs) || 3500;
-    while (true) {
-      await delay(Math.max(1500, Math.min(10000, pollAfterMs)));
-      response = await fetch(`${API_BASE}/api/try-on/jobs/${encodeURIComponent(task.jobId)}`);
-      if (response.status !== 202) break;
-      const progress = await response.json();
-      pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
-    }
-    if (!response.ok) throw new Error(await responseError(response));
-    const blob = await response.blob();
-    if (!blob.type.startsWith("image/")) throw new Error("服务没有返回有效图片");
-    if (resultUrl) URL.revokeObjectURL(resultUrl);
-    resultUrl = URL.createObjectURL(blob);
-    elements.resultImage.src = resultUrl;
-    stopProgress(true);
-    window.setTimeout(() => setView("ready"), 260);
-    elements.resultMeta.textContent = "Ready";
+    if (!JOB_ID_PATTERN.test(task.jobId) || task.status !== "processing") throw new Error("服务没有返回有效任务");
+    activeJobId = task.jobId;
+    window.localStorage.setItem(PENDING_JOB_KEY, activeJobId);
+    await finishBackgroundJob(activeJobId, Number(task.pollAfterMs) || 5000);
   } catch (error) {
     stopProgress();
     elements.errorMessage.textContent = error instanceof Error ? error.message : "生成失败，请稍后再试";
@@ -198,7 +193,73 @@ async function generateTryOn() {
     elements.resultMeta.textContent = "Not completed";
   } finally {
     elements.generate.querySelector("span").textContent = "生成试穿效果";
-    updateButton();
+    elements.generate.disabled = Boolean(activeJobId) || !(personFile && garmentFiles.length > 0 && elements.consent.checked);
+  }
+}
+
+async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
+  const response = await waitForBackgroundJob(jobId, initialPollAfterMs);
+  if (!response.ok) {
+    clearPendingJob(jobId);
+    throw new Error(await responseError(response));
+  }
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) {
+    clearPendingJob(jobId);
+    throw new Error("服务没有返回有效图片");
+  }
+  if (resultUrl) URL.revokeObjectURL(resultUrl);
+  resultUrl = URL.createObjectURL(blob);
+  elements.resultImage.src = resultUrl;
+  clearPendingJob(jobId);
+  stopProgress(true);
+  window.setTimeout(() => setView("ready"), 260);
+  elements.resultMeta.textContent = "Ready";
+}
+
+async function waitForBackgroundJob(jobId, initialPollAfterMs) {
+  let pollAfterMs = initialPollAfterMs;
+  while (activeJobId === jobId) {
+    const foregroundDelay = Math.max(2000, Math.min(10000, pollAfterMs));
+    await delay(document.hidden ? Math.max(15000, foregroundDelay) : foregroundDelay);
+    let response;
+    try {
+      response = await fetch(`${API_BASE}/api/try-on/jobs/${encodeURIComponent(jobId)}`);
+    } catch {
+      pollAfterMs = 10000;
+      continue;
+    }
+    if (response.status !== 202) return response;
+    const progress = await response.json();
+    pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
+  }
+  throw new Error("任务已停止");
+}
+
+function clearPendingJob(jobId) {
+  if (activeJobId === jobId) activeJobId = "";
+  if (window.localStorage.getItem(PENDING_JOB_KEY) === jobId) window.localStorage.removeItem(PENDING_JOB_KEY);
+}
+
+async function restorePendingJob() {
+  const jobId = window.localStorage.getItem(PENDING_JOB_KEY) || "";
+  if (!JOB_ID_PATTERN.test(jobId)) {
+    window.localStorage.removeItem(PENDING_JOB_KEY);
+    return;
+  }
+  activeJobId = jobId;
+  setView("generating");
+  elements.resultMeta.textContent = "Background task";
+  startProgress(true);
+  try {
+    await finishBackgroundJob(jobId, 1000);
+  } catch (error) {
+    stopProgress();
+    elements.errorMessage.textContent = error instanceof Error ? error.message : "生成失败，请稍后再试";
+    setView("error");
+    elements.resultMeta.textContent = "Not completed";
+  } finally {
+    elements.generate.disabled = Boolean(activeJobId) || !(personFile && garmentFiles.length > 0 && elements.consent.checked);
   }
 }
 
@@ -244,3 +305,4 @@ elements.download.addEventListener("click", () => {
 bindDropZone(elements.personDropZone, (files) => { if (files[0]) setPerson(files[0]); });
 bindDropZone(elements.garmentDropZone, addGarments);
 updateButton();
+restorePendingJob().catch(() => {});

@@ -124,13 +124,13 @@
               <small>Add one photo and at least one piece.</small>
             </div>
 
-            <div class="generating-state" id="generatingState" hidden>
+            <div class="generating-state" id="generatingState" role="status" aria-live="polite" hidden>
               <div class="scan-frame">
                 <div class="scan-line"></div>
                 <div class="generating-figure"></div>
               </div>
               <p id="generatingTitle">Reading your references…</p>
-              <small>This usually takes under a minute.</small>
+              <small id="generatingNote">You can close this page. We’ll restore it when you return.</small>
               <div class="progress-track"><span id="progressBar"></span></div>
             </div>
 

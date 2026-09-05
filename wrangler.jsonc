@@ -6,6 +6,13 @@
   "compatibility_date": "2026-09-05",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "workflows": [
+    {
+      "binding": "TRY_ON_WORKFLOW",
+      "name": "lv-virtual-try-on-generation",
+      "class_name": "TryOnWorkflow"
+    }
+  ],
   "vars": {
     "ALLOWED_ORIGIN": "https://augustzad.github.io",
     "R2_BUCKET": "moonshort",
