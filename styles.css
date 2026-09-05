@@ -32,6 +32,8 @@ body {
 button, input, textarea, select { font: inherit; }
 button, label, select { -webkit-tap-highlight-color: transparent; }
 button, .upload-zone, .garment-add, .garment-card { cursor: pointer; }
+button, label, select { touch-action: manipulation; }
+img { max-width: 100%; }
 
 button:focus-visible,
 input:focus-visible,
@@ -205,20 +207,40 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
 
 @media (max-width: 760px) {
   .site-header, main, .site-footer { width: min(100% - 28px, 620px); }
-  .site-header { padding: 20px 0; }
+  .site-header { padding: calc(16px + env(safe-area-inset-top)) 0 16px; }
   .brand-rule { width: 16px; }
   .brand-name { font-size: 9px; }
   .model-pill { padding: 8px 10px; font-size: 9px; }
-  .intro { display: block; padding: 42px 0 34px; }
-  .eyebrow { margin-bottom: 22px; padding: 0; }
-  h1 { font-size: clamp(52px, 16.5vw, 82px); }
-  .lede { margin-top: 25px; font-size: 13px; }
+  .intro { display: block; padding: 28px 0 26px; }
+  .eyebrow { margin-bottom: 14px; padding: 0; font-size: 9px; }
+  h1 { font-size: clamp(48px, 14.5vw, 72px); line-height: 0.88; }
+  .lede { margin-top: 18px; font-size: 12px; line-height: 1.55; }
   .studio { display: block; min-height: 0; }
-  .input-panel { padding: 24px 20px 28px; border-right: 0; border-bottom: 1px solid var(--line-strong); }
-  .upload-zone { height: 260px; }
+  .input-panel { padding: 22px 18px 28px; border-right: 0; border-bottom: 1px solid var(--line-strong); }
+  .panel-heading h2 { font-size: 15px; }
+  .panel-heading p { font-size: 11px; }
+  .upload-zone { height: min(76vw, 340px); min-height: 250px; margin: 18px 0 30px; }
+  .upload-empty strong { font-size: 13px; }
+  .upload-empty small { font-size: 10px; }
   .garment-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .garment-add span { font-size: 10px; }
+  .garment-card button { top: 7px; right: 7px; width: 44px; height: 44px; }
+  .garment-card button svg { width: 15px; }
+  .mode-option > span { min-height: 72px; padding: 13px; }
+  .mode-option strong { font-size: 11px; }
+  .mode-option small { font-size: 9px; }
+  textarea, select { font-size: 16px; }
+  textarea { min-height: 92px; }
+  select, .format-note strong { height: 48px; }
+  .format-note strong { font-size: 11px; }
+  .consent-row { grid-template-columns: 24px 1fr; gap: 11px; font-size: 10px; }
+  .checkmark { width: 22px; height: 22px; }
+  .generate-button { position: sticky; z-index: 4; bottom: calc(10px + env(safe-area-inset-bottom)); height: 58px; box-shadow: 0 12px 28px rgba(23, 22, 19, 0.2); font-size: 12px; }
   .result-panel { padding: 14px; }
   .result-stage { min-height: min(132vw, 680px); }
+  .result-ready > img { touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+  .result-pager button { width: 44px; min-height: 44px; }
+  .result-actions button, .error-state button { min-height: 44px; padding: 0 15px; font-size: 10px; }
   .result-footnote { gap: 18px; line-height: 1.4; }
   .result-footnote span:last-child { text-align: right; }
   .site-footer { padding-bottom: calc(28px + env(safe-area-inset-bottom)); }
@@ -229,10 +251,26 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
   .brand-name { display: none; }
   .panel-heading { grid-template-columns: 28px 1fr auto; }
   .garment-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
-  .settings-row { gap: 12px; }
+  .settings-row { grid-template-columns: 1fr; gap: 16px; }
   .result-actions { right: 10px; bottom: 10px; left: 10px; }
   .result-actions button { flex: 1; justify-content: center; }
-  .result-pager { bottom: 62px; left: 10px; }
+  .result-pager { bottom: 66px; left: 10px; min-height: 44px; }
+  .result-empty p, .generating-state p, .error-state p { font-size: 22px; }
+}
+
+@media (max-width: 360px) {
+  .site-header, main, .site-footer { width: calc(100% - 18px); }
+  .input-panel { padding-inline: 14px; }
+  .mode-options { grid-template-columns: 1fr; }
+  .mode-option + .mode-option { border-top: 1px solid var(--line); border-left: 0; }
+  .mode-option > span { min-height: 62px; }
+}
+
+@media (max-height: 520px) and (orientation: landscape) {
+  .intro { padding-block: 22px; }
+  .intro h1 em { display: inline; }
+  .upload-zone { min-height: 210px; height: 52vh; }
+  .result-stage { min-height: 82vh; }
 }
 
 @media (prefers-reduced-motion: reduce) {

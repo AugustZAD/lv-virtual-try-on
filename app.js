@@ -48,6 +48,7 @@ let resultUrls = [];
 let activeResultIndex = 0;
 let progressTimer = 0;
 let activeJobId = "";
+let resultTouchStart = null;
 
 function validateImage(file) {
   if (!ACCEPTED_TYPES.has(file.type)) return "请使用 JPG、PNG 或 WEBP 图片";
@@ -344,6 +345,21 @@ elements.nextResult.addEventListener("click", () => {
   activeResultIndex += 1;
   renderActiveResult();
 });
+elements.resultImage.addEventListener("touchstart", (event) => {
+  const touch = event.changedTouches[0];
+  resultTouchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+}, { passive: true });
+elements.resultImage.addEventListener("touchend", (event) => {
+  if (!resultTouchStart || resultUrls.length < 2) return;
+  const touch = event.changedTouches[0];
+  if (!touch) return;
+  const deltaX = touch.clientX - resultTouchStart.x;
+  const deltaY = touch.clientY - resultTouchStart.y;
+  resultTouchStart = null;
+  if (Math.abs(deltaX) < 48 || Math.abs(deltaX) <= Math.abs(deltaY) * 1.2) return;
+  activeResultIndex += deltaX < 0 ? 1 : -1;
+  renderActiveResult();
+}, { passive: true });
 elements.download.addEventListener("click", () => {
   if (!resultUrls[activeResultIndex]) return;
   const link = document.createElement("a");
