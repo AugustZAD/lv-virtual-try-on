@@ -122,6 +122,24 @@ function createJobId() {
   return `job_${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function recoveryJobFromUrl() {
+  if (window.location.protocol === "file:") return "";
+  const url = new URL(window.location.href);
+  const jobId = (url.searchParams.get("job") || "").trim();
+  if (!JOB_ID_PATTERN.test(jobId)) return "";
+  window.localStorage.setItem(PENDING_JOB_KEY, jobId);
+  url.searchParams.delete("job");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  return jobId;
+}
+
+function openLiveApp() {
+  const url = new URL(PUBLIC_APP_URL);
+  const pendingJobId = window.localStorage.getItem(PENDING_JOB_KEY) || "";
+  if (JOB_ID_PATTERN.test(pendingJobId)) url.searchParams.set("job", pendingJobId);
+  window.location.assign(url.toString());
+}
+
 function releaseResultUrls() {
   resultUrls.forEach((url) => {
     if (url.startsWith("blob:")) URL.revokeObjectURL(url);
@@ -389,7 +407,7 @@ function clearPendingJob(jobId) {
 }
 
 async function restorePendingJob() {
-  const jobId = window.localStorage.getItem(PENDING_JOB_KEY) || "";
+  const jobId = recoveryJobFromUrl() || window.localStorage.getItem(PENDING_JOB_KEY) || "";
   if (!JOB_ID_PATTERN.test(jobId)) {
     window.localStorage.removeItem(PENDING_JOB_KEY);
     return;
@@ -441,7 +459,7 @@ document.querySelectorAll('input[name="poseMode"]').forEach((input) => input.add
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
 elements.retry.addEventListener("click", () => {
-  if (window.location.protocol === "file:") window.location.assign(PUBLIC_APP_URL);
+  if (window.location.protocol === "file:") openLiveApp();
   else generateTryOn();
 });
 elements.reset.addEventListener("click", () => {
