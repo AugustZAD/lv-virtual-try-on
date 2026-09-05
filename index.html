@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f4f0e9">
-    <meta name="description" content="上传真人照片和服装参考，用 GPT Image 2 生成自然、真实的试穿效果。">
-    <title>LV Fitting Room — AI 真人试穿</title>
+    <meta name="description" content="A simple GPT Image 2 virtual fitting room.">
+    <title>LV Fitting Room</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
@@ -26,9 +26,9 @@
 
     <main>
       <section class="intro" aria-labelledby="page-title">
-        <p class="eyebrow">AI VIRTUAL STYLING STUDIO</p>
-        <h1 id="page-title">把想穿的，<em>先穿上看看。</em></h1>
-        <p class="lede">一张真人照，加上一组衣服。保留你的样貌与姿态，生成自然可信的完整试穿效果。</p>
+        <p class="eyebrow">VIRTUAL FITTING ROOM</p>
+        <h1 id="page-title">See it <em>on you.</em></h1>
+        <p class="lede">One photo. Up to six pieces. One finished look.</p>
       </section>
 
       <section class="studio" aria-label="AI 试穿工作台">
@@ -36,8 +36,8 @@
           <div class="panel-heading">
             <span>01</span>
             <div>
-              <h2>上传真人照</h2>
-              <p>全身或半身、光线清楚的照片效果最好</p>
+              <h2>Your photo</h2>
+              <p>Clear, full- or half-body works best.</p>
             </div>
           </div>
 
@@ -45,8 +45,8 @@
             <input id="personInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
             <span class="upload-empty" id="personEmpty">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
-              <strong>选择或拖入真人照片</strong>
-              <small>JPG、PNG 或 WEBP · 最大 8 MB</small>
+              <strong>Choose or drop a photo</strong>
+              <small>JPG, PNG or WEBP · 8 MB max</small>
             </span>
             <span class="person-preview" id="personPreview" hidden>
               <img id="personImage" alt="已选择的真人照片">
@@ -57,8 +57,8 @@
           <div class="panel-heading garment-heading">
             <span>02</span>
             <div>
-              <h2>添加想试穿的衣服</h2>
-              <p>可一次加入上衣、下装、外套等，最多 6 件</p>
+              <h2>Your pieces</h2>
+              <p>Add up to six clothing references.</p>
             </div>
             <span class="count-badge" id="garmentCount">0 / 6</span>
           </div>
@@ -72,13 +72,13 @@
           </div>
 
           <label class="direction-field">
-            <span>穿搭方向 <small>选填</small></span>
+            <span>Styling note <small>Optional</small></span>
             <textarea id="directionInput" maxlength="300" rows="3" placeholder="例如：把外套敞开穿，保留照片里的鞋子，整体偏日常松弛感。"></textarea>
           </label>
 
           <div class="settings-row">
             <label>
-              <span>画质</span>
+              <span>Quality</span>
               <select id="qualityInput">
                 <option value="low">快速</option>
                 <option value="medium" selected>标准</option>
@@ -86,8 +86,8 @@
               </select>
             </label>
             <div class="format-note">
-              <span>画幅</span>
-              <strong>竖版 · 1024 × 1536</strong>
+              <span>Format</span>
+              <strong>Portrait · 1024 × 1536</strong>
             </div>
           </div>
 
@@ -111,8 +111,8 @@
 
         <div class="result-panel" id="resultPanel">
           <div class="result-topline">
-            <span>03 · 试穿结果</span>
-            <span id="resultMeta">等待素材</span>
+            <span>03 · Result</span>
+            <span id="resultMeta">Awaiting input</span>
           </div>
 
           <div class="result-stage" id="resultStage">
@@ -120,8 +120,8 @@
               <div class="silhouette" aria-hidden="true">
                 <svg viewBox="0 0 220 300"><path d="M110 18c23 0 39 18 39 42 0 17-9 31-22 38 32 9 54 33 60 70l16 106H17l16-106c6-37 28-61 60-70-13-7-22-21-22-38 0-24 16-42 39-42Z"/></svg>
               </div>
-              <p>你的造型会在这里出现</p>
-              <small>先在左侧添加真人照与至少一件衣服</small>
+              <p>Your look appears here.</p>
+              <small>Add one photo and at least one piece.</small>
             </div>
 
             <div class="generating-state" id="generatingState" hidden>
@@ -129,8 +129,8 @@
                 <div class="scan-line"></div>
                 <div class="generating-figure"></div>
               </div>
-              <p id="generatingTitle">正在理解人物与衣服…</p>
-              <small>通常需要几十秒，请不要关闭页面</small>
+              <p id="generatingTitle">Reading your references…</p>
+              <small>This usually takes under a minute.</small>
               <div class="progress-track"><span id="progressBar"></span></div>
             </div>
 
@@ -157,7 +157,7 @@
 
           <div class="result-footnote">
             <span>IMAGE-TO-IMAGE · HIGH FIDELITY</span>
-            <span>效果由 AI 生成，请以实物试穿为准</span>
+            <span>AI preview · Fit may vary</span>
           </div>
         </div>
       </section>

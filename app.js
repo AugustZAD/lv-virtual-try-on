@@ -103,10 +103,10 @@ function renderGarments() {
 function updateButton() {
   const ready = personFile && garmentFiles.length > 0 && elements.consent.checked;
   elements.generate.disabled = !ready;
-  if (!personFile) elements.resultMeta.textContent = "等待真人照";
-  else if (!garmentFiles.length) elements.resultMeta.textContent = "等待衣服";
-  else if (!elements.consent.checked) elements.resultMeta.textContent = "请确认照片许可";
-  else elements.resultMeta.textContent = `${garmentFiles.length} 件衣服已就绪`;
+  if (!personFile) elements.resultMeta.textContent = "Add a photo";
+  else if (!garmentFiles.length) elements.resultMeta.textContent = "Add clothing";
+  else if (!elements.consent.checked) elements.resultMeta.textContent = "Confirm consent";
+  else elements.resultMeta.textContent = `${garmentFiles.length} piece${garmentFiles.length > 1 ? "s" : ""} ready`;
 }
 
 function bindDropZone(zone, onFiles) {
@@ -130,10 +130,10 @@ function setView(view) {
 
 function startProgress() {
   const messages = [
-    "正在理解人物与衣服…",
-    "正在还原面料与版型…",
-    "正在调整自然褶皱与光影…",
-    "正在完成你的试穿效果…"
+    "Reading your references…",
+    "Rebuilding fabric and form…",
+    "Refining folds and light…",
+    "Finishing your look…"
   ];
   let progress = 10;
   let message = 0;
@@ -156,7 +156,7 @@ async function generateTryOn() {
   setView("generating");
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
-  elements.resultMeta.textContent = "GPT Image 2 生成中";
+  elements.resultMeta.textContent = "Generating";
   startProgress();
   elements.resultPanel.scrollIntoView({ behavior: "smooth", block: "center" });
 
@@ -184,12 +184,12 @@ async function generateTryOn() {
     elements.resultImage.src = resultUrl;
     stopProgress(true);
     window.setTimeout(() => setView("ready"), 260);
-    elements.resultMeta.textContent = "生成完成";
+    elements.resultMeta.textContent = "Ready";
   } catch (error) {
     stopProgress();
     elements.errorMessage.textContent = error instanceof Error ? error.message : "生成失败，请稍后再试";
     setView("error");
-    elements.resultMeta.textContent = "生成未完成";
+    elements.resultMeta.textContent = "Not completed";
   } finally {
     elements.generate.querySelector("span").textContent = "生成试穿效果";
     updateButton();
@@ -210,7 +210,7 @@ elements.generate.addEventListener("click", generateTryOn);
 elements.retry.addEventListener("click", generateTryOn);
 elements.reset.addEventListener("click", () => {
   setView("empty");
-  elements.resultMeta.textContent = "可以调整后再次生成";
+  elements.resultMeta.textContent = "Ready to revise";
   elements.direction.focus();
   window.scrollTo({ top: elements.direction.getBoundingClientRect().top + window.scrollY - 80, behavior: "smooth" });
 });
