@@ -87,7 +87,7 @@ function selectedPoseMode() {
 
 function selectedResultColumns() {
   const value = Number(document.querySelector('input[name="resultColumns"]:checked')?.value || 1);
-  return [1, 2, 3].includes(value) ? value : 1;
+  return [1, 2, 3, 4, 5].includes(value) ? value : 1;
 }
 
 function syncResultColumns() {
@@ -98,7 +98,7 @@ function syncResultColumns() {
 
 function restoreResultColumns() {
   const saved = Number(window.localStorage.getItem(RESULT_COLUMNS_KEY) || 1);
-  const input = document.querySelector(`input[name="resultColumns"][value="${[1, 2, 3].includes(saved) ? saved : 1}"]`);
+  const input = document.querySelector(`input[name="resultColumns"][value="${[1, 2, 3, 4, 5].includes(saved) ? saved : 1}"]`);
   if (input instanceof HTMLInputElement) input.checked = true;
 }
 

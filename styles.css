@@ -132,7 +132,8 @@ h1 em { display: block; color: var(--accent); font-weight: 400; }
 .mode-fieldset legend, .pose-fieldset legend, .columns-fieldset legend { margin-bottom: 9px; padding: 0; font-size: 10px; font-weight: 600; }
 .mode-options, .pose-options, .column-options { display: grid; border: 1px solid var(--line); }
 .mode-options { grid-template-columns: 1fr 1fr; }
-.pose-options, .column-options { grid-template-columns: repeat(3, 1fr); }
+.pose-options { grid-template-columns: repeat(3, 1fr); }
+.column-options { grid-template-columns: repeat(5, 1fr); }
 .mode-option, .pose-option, .column-option { position: relative; display: block; min-width: 0; cursor: pointer; }
 .mode-option + .mode-option, .pose-option + .pose-option, .column-option + .column-option { border-left: 1px solid var(--line); }
 .mode-option input, .pose-option input, .column-option input { position: absolute; opacity: 0; pointer-events: none; }
@@ -264,6 +265,8 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
   .mode-option > span, .pose-option > span, .column-option > span { min-height: 72px; padding: 12px; }
   .mode-option strong, .pose-option strong, .column-option strong { font-size: 11px; }
   .mode-option small, .pose-option small, .column-option small { font-size: 9px; }
+  .column-option > span { min-height: 64px; padding: 9px 4px; text-align: center; align-items: center; }
+  .column-option small { font-size: 8px; }
   .pose-upload { height: 110px; }
   .pose-upload-empty strong { font-size: 12px; }
   .pose-upload-empty small { font-size: 10px; }
