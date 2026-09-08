@@ -200,6 +200,13 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
 .scan-line { position: absolute; z-index: 2; top: 0; left: 0; width: 100%; height: 1px; background: var(--accent); box-shadow: 0 0 14px var(--accent); animation: scan 2.1s ease-in-out infinite alternate; }
 .progress-track { height: 2px; margin-top: 24px; overflow: hidden; background: rgba(23, 22, 19, 0.14); }
 .progress-track span { display: block; width: 12%; height: 100%; background: var(--accent); transition: width 900ms cubic-bezier(.2,.8,.2,1); }
+.generating-task { display: flex; min-height: 38px; margin-top: 15px; border: 1px solid rgba(23, 22, 19, 0.16); align-items: center; justify-content: space-between; background: rgba(255, 253, 249, 0.38); }
+.generating-task code { min-width: 0; padding: 0 11px; overflow: hidden; color: #5e5952; font-family: var(--sans); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.generating-task button, .release-task-button { min-height: 38px; border: 0; color: var(--ink); background: transparent; font-size: 9px; font-weight: 600; transition: color 180ms ease, background 180ms ease; }
+.generating-task button { padding: 0 11px; border-left: 1px solid rgba(23, 22, 19, 0.16); }
+.generating-task button:hover, .release-task-button:hover { color: var(--white); background: var(--ink); }
+.release-task-button { width: 100%; margin-top: 9px; border: 1px solid rgba(23, 22, 19, 0.3); }
+.generating-state .release-task-note { display: block; margin-top: 8px; line-height: 1.45; }
 
 .result-ready { position: absolute; inset: 0; }
 .result-ready > img { display: block; width: 100%; height: 100%; object-fit: contain; background: #cfc8be; }
@@ -217,7 +224,8 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
 .result-actions button:hover, .error-state button:hover { color: var(--white); background: var(--ink); }
 .result-actions svg { width: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
 
-.error-state { max-width: 360px; padding: 32px; text-align: center; }
+.error-state { max-width: 420px; padding: 32px; text-align: center; }
+.error-state p { overflow-wrap: anywhere; white-space: pre-line; }
 .error-state > svg { width: 38px; margin-bottom: 18px; fill: none; stroke: var(--accent-dark); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.3; }
 .error-state button { margin: 18px auto 0; border-color: var(--line-strong); }
 
@@ -270,6 +278,9 @@ select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--lin
   .generate-button { position: static; height: 58px; box-shadow: 0 8px 20px rgba(23, 22, 19, 0.12); font-size: 12px; }
   .result-panel { padding: 14px; }
   .result-stage { min-height: min(132vw, 680px); }
+  .generating-state { width: min(360px, 86%); }
+  .generating-task, .generating-task button, .release-task-button { min-height: 44px; }
+  .generating-task code, .generating-task button, .release-task-button { font-size: 10px; }
   .result-ready > img { touch-action: pan-y; user-select: none; -webkit-user-select: none; }
   .result-warning { top: 10px; right: 10px; left: 10px; padding: 12px; font-size: 10px; }
   .result-pager button { width: 44px; min-height: 44px; }

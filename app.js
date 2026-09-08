@@ -10,6 +10,7 @@ const JOB_ID_PATTERN = /^job_[a-f0-9]{32}$/;
 
 const elements = {
   consent: document.querySelector("#consentInput"),
+  copyTask: document.querySelector("#copyTaskButton"),
   direction: document.querySelector("#directionInput"),
   download: document.querySelector("#downloadButton"),
   error: document.querySelector("#errorState"),
@@ -48,6 +49,8 @@ const elements = {
   resultPosition: document.querySelector("#resultPosition"),
   resultReady: document.querySelector("#resultReady"),
   resultWarning: document.querySelector("#resultWarning"),
+  releaseTask: document.querySelector("#releaseTaskButton"),
+  taskReference: document.querySelector("#activeTaskReference"),
   nextResult: document.querySelector("#nextResultButton"),
   retry: document.querySelector("#retryButton")
 };
@@ -63,6 +66,14 @@ let activeResultIndex = 0;
 let progressTimer = 0;
 let activeJobId = "";
 let resultTouchStart = null;
+const releasedJobIds = new Set();
+
+class JobReleasedError extends Error {
+  constructor() {
+    super("This task was released from the screen.");
+    this.name = "JobReleasedError";
+  }
+}
 
 function prepareImage(file) {
   if (file.size < 1) return { error: "This image is empty." };
@@ -278,6 +289,12 @@ function startProgress(restored = false) {
   }, 4200);
 }
 
+function showActiveTask(jobId) {
+  elements.taskReference.dataset.jobId = jobId;
+  elements.taskReference.textContent = `Task · ${jobId.slice(-8).toUpperCase()}`;
+  elements.copyTask.textContent = "Copy ID";
+}
+
 function stopProgress(complete = false) {
   window.clearInterval(progressTimer);
   if (complete) elements.progress.style.width = "100%";
@@ -302,6 +319,7 @@ async function generateTryOn() {
   const jobId = createJobId();
   activeJobId = jobId;
   window.localStorage.setItem(PENDING_JOB_KEY, jobId);
+  showActiveTask(jobId);
   setView("generating");
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
@@ -332,6 +350,8 @@ async function generateTryOn() {
     accepted = true;
     await finishBackgroundJob(jobId, Number(task.pollAfterMs) || 5000);
   } catch (error) {
+    const wasReleased = releasedJobIds.delete(jobId);
+    if (error instanceof JobReleasedError || wasReleased) return;
     let failure = error;
     if (!accepted && activeJobId === jobId) {
       elements.generatingTitle.textContent = "Confirming your background task…";
@@ -343,7 +363,8 @@ async function generateTryOn() {
       }
     }
     stopProgress();
-    elements.errorMessage.textContent = failure instanceof Error ? failure.message : "生成失败，请稍后再试";
+    const message = failure instanceof Error ? failure.message : "Generation failed.";
+    elements.errorMessage.textContent = `${message}\nTask ID: ${jobId}`;
     setView("error");
     elements.resultMeta.textContent = "Not completed";
   } finally {
@@ -354,6 +375,7 @@ async function generateTryOn() {
 
 async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
   const response = await waitForBackgroundJob(jobId, initialPollAfterMs);
+  if (activeJobId !== jobId) throw new JobReleasedError();
   if (!response.ok) {
     clearPendingJob(jobId);
     throw new Error(await responseError(response));
@@ -420,7 +442,7 @@ async function waitForBackgroundJob(jobId, initialPollAfterMs) {
     }
     pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
   }
-  throw new Error("任务已停止");
+  throw new JobReleasedError();
 }
 
 function clearPendingJob(jobId) {
@@ -435,14 +457,18 @@ async function restorePendingJob() {
     return;
   }
   activeJobId = jobId;
+  showActiveTask(jobId);
   setView("generating");
   elements.resultMeta.textContent = "Background task";
   startProgress(true);
   try {
     await finishBackgroundJob(jobId, 1000);
   } catch (error) {
+    const wasReleased = releasedJobIds.delete(jobId);
+    if (error instanceof JobReleasedError || wasReleased) return;
     stopProgress();
-    elements.errorMessage.textContent = error instanceof Error ? error.message : "生成失败，请稍后再试";
+    const message = error instanceof Error ? error.message : "Generation failed.";
+    elements.errorMessage.textContent = `${message}\nTask ID: ${jobId}`;
     setView("error");
     elements.resultMeta.textContent = "Not completed";
   } finally {
@@ -482,6 +508,28 @@ elements.poseInput.addEventListener("change", (event) => {
 document.querySelectorAll('input[name="poseMode"]').forEach((input) => input.addEventListener("change", syncPoseMode));
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
+elements.copyTask.addEventListener("click", async () => {
+  const jobId = elements.taskReference.dataset.jobId || "";
+  if (!JOB_ID_PATTERN.test(jobId)) return;
+  try {
+    await navigator.clipboard.writeText(jobId);
+    elements.copyTask.textContent = "Copied";
+    window.setTimeout(() => { elements.copyTask.textContent = "Copy ID"; }, 1800);
+  } catch {
+    elements.taskReference.textContent = jobId;
+  }
+});
+elements.releaseTask.addEventListener("click", () => {
+  const jobId = activeJobId;
+  if (!jobId) return;
+  releasedJobIds.add(jobId);
+  clearPendingJob(jobId);
+  stopProgress();
+  setView("empty");
+  elements.resultMeta.textContent = "Ready for a new fitting";
+  updateButton();
+  elements.generate.scrollIntoView({ behavior: "smooth", block: "center" });
+});
 elements.retry.addEventListener("click", () => {
   if (window.location.protocol === "file:") openLiveApp();
   else generateTryOn();

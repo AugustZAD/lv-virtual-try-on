@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=9">
+    <link rel="stylesheet" href="styles.css?v=10">
   </head>
   <body>
     <header class="site-header">
@@ -184,6 +184,12 @@
               <p id="generatingTitle">Reading your references…</p>
               <small id="generatingNote">You can close this page. We’ll restore it when you return.</small>
               <div class="progress-track"><span id="progressBar"></span></div>
+              <div class="generating-task">
+                <code id="activeTaskReference">Task pending</code>
+                <button id="copyTaskButton" type="button">Copy ID</button>
+              </div>
+              <button class="release-task-button" id="releaseTaskButton" type="button">Start new fitting</button>
+              <small class="release-task-note">Releases this screen only. The background task may still finish.</small>
             </div>
 
             <div class="result-ready" id="resultReady" hidden>
@@ -230,6 +236,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js?v=11" defer></script>
+    <script src="app.js?v=12" defer></script>
   </body>
 </html>
