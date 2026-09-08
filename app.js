@@ -6,7 +6,6 @@ const MAX_TOTAL_BYTES = 40 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const EXTENSION_TYPES = new Map([["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"]]);
 const PENDING_JOB_KEY = "lv-fitting-pending-job";
-const RESULT_COLUMNS_KEY = "lv-fitting-result-columns";
 const JOB_ID_PATTERN = /^job_[a-f0-9]{32}$/;
 
 const elements = {
@@ -42,7 +41,6 @@ const elements = {
   progress: document.querySelector("#progressBar"),
   reset: document.querySelector("#resetButton"),
   resultEmpty: document.querySelector("#resultEmpty"),
-  resultGrid: document.querySelector("#resultGrid"),
   resultImage: document.querySelector("#resultImage"),
   resultMeta: document.querySelector("#resultMeta"),
   resultPager: document.querySelector("#resultPager"),
@@ -83,23 +81,6 @@ function setPersonFeedback(state, message) {
 
 function selectedPoseMode() {
   return document.querySelector('input[name="poseMode"]:checked')?.value || "original";
-}
-
-function selectedResultColumns() {
-  const value = Number(document.querySelector('input[name="resultColumns"]:checked')?.value || 1);
-  return [1, 2, 3, 4, 5].includes(value) ? value : 1;
-}
-
-function syncResultColumns() {
-  const columns = selectedResultColumns();
-  window.localStorage.setItem(RESULT_COLUMNS_KEY, String(columns));
-  if (resultUrls.length) renderActiveResult();
-}
-
-function restoreResultColumns() {
-  const saved = Number(window.localStorage.getItem(RESULT_COLUMNS_KEY) || 1);
-  const input = document.querySelector(`input[name="resultColumns"][value="${[1, 2, 3, 4, 5].includes(saved) ? saved : 1}"]`);
-  if (input instanceof HTMLInputElement) input.checked = true;
 }
 
 function setPoseFeedback(state, message) {
@@ -387,37 +368,6 @@ async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
 function renderActiveResult() {
   if (!resultUrls.length) return;
   activeResultIndex = Math.max(0, Math.min(resultUrls.length - 1, activeResultIndex));
-  const columns = selectedResultColumns();
-  const useGrid = columns > 1;
-  elements.resultImage.hidden = useGrid;
-  elements.resultGrid.hidden = !useGrid;
-
-  if (useGrid) {
-    elements.resultGrid.style.setProperty("--result-columns", String(columns));
-    elements.resultGrid.replaceChildren(...resultUrls.map((url, index) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `result-grid-item${index === activeResultIndex ? " is-active" : ""}`;
-      button.setAttribute("aria-label", `选择第 ${index + 1} 张试穿结果`);
-      button.setAttribute("aria-pressed", String(index === activeResultIndex));
-      const image = document.createElement("img");
-      image.src = url;
-      image.alt = `AI 生成的试穿效果，第 ${index + 1} 张，共 ${resultUrls.length} 张`;
-      image.loading = "lazy";
-      button.append(image);
-      button.addEventListener("click", () => {
-        activeResultIndex = index;
-        elements.resultGrid.querySelectorAll(".result-grid-item").forEach((item, itemIndex) => {
-          item.classList.toggle("is-active", itemIndex === activeResultIndex);
-          item.setAttribute("aria-pressed", String(itemIndex === activeResultIndex));
-        });
-      });
-      return button;
-    }));
-    elements.resultPager.hidden = true;
-    return;
-  }
-
   elements.resultImage.src = resultUrls[activeResultIndex];
   elements.resultImage.alt = resultUrls.length > 1
     ? `AI 生成的试穿效果，第 ${activeResultIndex + 1} 张，共 ${resultUrls.length} 张`
@@ -506,7 +456,6 @@ elements.poseInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 document.querySelectorAll('input[name="poseMode"]').forEach((input) => input.addEventListener("change", syncPoseMode));
-document.querySelectorAll('input[name="resultColumns"]').forEach((input) => input.addEventListener("change", syncResultColumns));
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
 elements.retry.addEventListener("click", () => {
@@ -566,7 +515,6 @@ elements.download.addEventListener("click", async () => {
 bindDropZone(elements.personDropZone, (files) => { if (files[0]) setPerson(files[0]); });
 bindDropZone(elements.garmentDropZone, addGarments);
 bindDropZone(elements.poseDropZone, (files) => { if (files[0]) setPoseReference(files[0]); });
-restoreResultColumns();
 syncPoseMode();
 updateButton();
 restorePendingJob().catch(() => {});

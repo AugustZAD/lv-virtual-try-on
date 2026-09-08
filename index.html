@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=8">
+    <link rel="stylesheet" href="styles.css?v=7">
   </head>
   <body>
     <header class="site-header">
@@ -143,32 +143,6 @@
             <strong>Portrait · 1024 × 1536</strong>
           </div>
 
-          <fieldset class="columns-fieldset">
-            <legend>Result columns</legend>
-            <div class="column-options">
-              <label class="column-option">
-                <input type="radio" name="resultColumns" value="1" checked>
-                <span><strong>1</strong><small>Large</small></span>
-              </label>
-              <label class="column-option">
-                <input type="radio" name="resultColumns" value="2">
-                <span><strong>2</strong><small>Compare</small></span>
-              </label>
-              <label class="column-option">
-                <input type="radio" name="resultColumns" value="3">
-                <span><strong>3</strong><small>Grid</small></span>
-              </label>
-              <label class="column-option">
-                <input type="radio" name="resultColumns" value="4">
-                <span><strong>4</strong><small>Dense</small></span>
-              </label>
-              <label class="column-option">
-                <input type="radio" name="resultColumns" value="5">
-                <span><strong>5</strong><small>Max</small></span>
-              </label>
-            </div>
-          </fieldset>
-
           <label class="consent-row">
             <input id="consentInput" type="checkbox">
             <span class="checkmark" aria-hidden="true">
@@ -214,7 +188,6 @@
 
             <div class="result-ready" id="resultReady" hidden>
               <img id="resultImage" alt="AI 生成的真人试穿效果" draggable="false">
-              <div class="result-grid" id="resultGrid" hidden></div>
               <div class="result-pager" id="resultPager" aria-label="试穿结果导航" hidden>
                 <button id="previousResultButton" type="button" aria-label="上一张结果">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>
@@ -256,6 +229,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js?v=10" defer></script>
+    <script src="app.js?v=8" defer></script>
   </body>
 </html>
