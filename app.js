@@ -47,6 +47,7 @@ const elements = {
   resultPanel: document.querySelector("#resultPanel"),
   resultPosition: document.querySelector("#resultPosition"),
   resultReady: document.querySelector("#resultReady"),
+  resultWarning: document.querySelector("#resultWarning"),
   nextResult: document.querySelector("#nextResultButton"),
   retry: document.querySelector("#retryButton")
 };
@@ -244,6 +245,19 @@ function setView(view) {
   elements.error.hidden = view !== "error";
 }
 
+function normalizedJobErrors(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || !Number.isInteger(item.look) || item.look < 1 || item.look > MAX_GARMENTS || typeof item.message !== "string") return [];
+    return [{ look: item.look, message: item.message.slice(0, 240) }];
+  });
+}
+
+function showResultErrors(errors) {
+  elements.resultWarning.hidden = !errors.length;
+  elements.resultWarning.textContent = errors.map((error) => error.message).join(" · ");
+}
+
 function startProgress(restored = false) {
   const messages = [
     restored ? "Restoring your background task…" : "Reading your references…",
@@ -292,6 +306,7 @@ async function generateTryOn() {
   elements.generate.disabled = true;
   elements.generate.querySelector("span").textContent = "正在生成";
   elements.resultMeta.textContent = "Generating";
+  showResultErrors([]);
   startProgress();
   elements.resultPanel.scrollIntoView({ behavior: "smooth", block: "center" });
 
@@ -355,13 +370,15 @@ async function finishBackgroundJob(jobId, initialPollAfterMs = 5000) {
   }
   releaseResultUrls();
   resultUrls = completed.results.map((result) => `${API_BASE}${result.url}`);
+  const jobErrors = normalizedJobErrors(completed.errors);
   activeResultIndex = 0;
   renderActiveResult();
   clearPendingJob(jobId);
   stopProgress(true);
   window.setTimeout(() => setView("ready"), 260);
+  showResultErrors(jobErrors);
   elements.resultMeta.textContent = completed.failedCount
-    ? `${resultUrls.length} ready · ${completed.failedCount} skipped`
+    ? `${resultUrls.length} ready · ${completed.failedCount} failed`
     : resultUrls.length > 1 ? `${resultUrls.length} looks` : "Ready";
 }
 
@@ -396,6 +413,11 @@ async function waitForBackgroundJob(jobId, initialPollAfterMs) {
     elements.generatingNote.textContent = "You can close this page. We’ll restore it when you return.";
     if (response.status !== 202) return response;
     const progress = await response.json();
+    const progressErrors = normalizedJobErrors(progress.errors);
+    if (progressErrors.length) {
+      elements.generatingNote.textContent = `${progressErrors.map((error) => error.message).join(" ")} Other looks are still running.`;
+      elements.resultMeta.textContent = `${progressErrors.length} failed · others running`;
+    }
     pollAfterMs = Number(progress.pollAfterMs) || pollAfterMs;
   }
   throw new Error("任务已停止");
@@ -436,7 +458,9 @@ async function responseError(response) {
   let message = "生成失败，请稍后再试";
   try {
     const detail = await response.json();
-    if (detail.error) message = detail.error;
+    const jobErrors = normalizedJobErrors(detail.errors);
+    if (jobErrors.length) message = jobErrors.map((error) => error.message).join(" ");
+    else if (detail.error) message = detail.error;
   } catch {}
   return message;
 }
@@ -464,6 +488,7 @@ elements.retry.addEventListener("click", () => {
 });
 elements.reset.addEventListener("click", () => {
   setView("empty");
+  showResultErrors([]);
   elements.resultMeta.textContent = "Ready to revise";
   elements.direction.focus();
   window.scrollTo({ top: elements.direction.getBoundingClientRect().top + window.scrollY - 80, behavior: "smooth" });

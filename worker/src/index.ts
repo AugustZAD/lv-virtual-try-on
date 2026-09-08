@@ -22,7 +22,8 @@ const POSE_VALUES = new Set(["original", "studio", "reference"]);
 const PROCESSING_STATUSES = new Set(["submitted", "queued", "pending", "processing", "running"]);
 const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled"]);
 const SUCCEEDED_STATUSES = new Set(["succeeded", "success", "completed", "complete"]);
-const LOOK_FAILURE_REASONS = new Set(["gateway_auth", "internal_error", "invalid_output", "provider_failed", "provider_timeout"]);
+const LOOK_FAILURE_REASONS = new Set(["gateway_auth", "gateway_error", "internal_error", "invalid_output", "provider_failed", "provider_timeout"]);
+const LOOK_FAILURE_STAGES = new Set(["generation", "poll", "result", "submit", "workflow"]);
 const TRUSTED_OUTPUT_HOSTS = new Set(["fc-gw-sh.oss-accelerate.aliyuncs.com"]);
 
 export default {
@@ -191,16 +192,22 @@ export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflow
       const submission = await step.do("submit Mob AI generation", {
         retries: { limit: 0, delay: "1 second", backoff: "constant" },
         timeout: "1 minute"
-      }, async () => {
-        const response = await mobPost(this.env, {
-          model: MOB_AI_IMAGE_MODEL,
-          mode: "async",
-          input: { aspectRatio: "2:3", prompt: generation.prompt, references: generation.references }
-        });
-        const taskId = response.task?.id ?? response.result?.taskId;
-        if (!taskId || taskId.length > 300) throw new Error("Mob AI submit response omitted task id");
-        return { taskId };
+      }, async (): Promise<MobSubmitResult> => {
+        try {
+          const response = await mobPost(this.env, {
+            model: MOB_AI_IMAGE_MODEL,
+            mode: "async",
+            input: { aspectRatio: "2:3", prompt: generation.prompt, references: generation.references }
+          });
+          const taskId = response.task?.id ?? response.result?.taskId;
+          if (!taskId || taskId.length > 300) throw new Error("Mob AI submit response omitted task id");
+          return { kind: "submitted", taskId };
+        } catch (error) {
+          if (error instanceof MobRequestError) return { kind: "failed", upstreamMessage: error.detail, upstreamStatus: error.status };
+          throw error;
+        }
       });
+      if (submission.kind === "failed") return lookFailure("gateway_error", event.instanceId, resultIndex, "submit", submission.upstreamStatus, submission.upstreamMessage);
 
       for (let pollIndex = 0; pollIndex < MAX_LOOK_POLLS; pollIndex += 1) {
         await step.sleep(`wait for Mob AI round ${pollIndex + 1}`, lookPollDelay(pollIndex));
@@ -216,19 +223,23 @@ export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflow
             }) };
           } catch (error) {
             const status = error instanceof MobRequestError ? error.status : 0;
-            return { kind: status === 401 || status === 403 ? "fatal" : "transient" };
+            return {
+              kind: "failed",
+              reason: status === 401 || status === 403 ? "gateway_auth" : "gateway_error",
+              upstreamMessage: error instanceof MobRequestError ? error.detail : "Mob AI status check failed",
+              upstreamStatus: status || undefined
+            };
           }
         });
-        if (check.kind === "transient") continue;
-        if (check.kind === "fatal") return lookFailure("gateway_auth", event.instanceId, resultIndex);
+        if (check.kind === "failed") return lookFailure(check.reason, event.instanceId, resultIndex, "poll", check.upstreamStatus, check.upstreamMessage);
 
         const response = check.response;
         const status = normalizedMobStatus(response);
         const outputUrl = mobOutputUrl(response);
         if (PROCESSING_STATUSES.has(status) || (!status && !outputUrl)) continue;
-        if (FAILED_STATUSES.has(status)) return lookFailure("provider_failed", event.instanceId, resultIndex);
+        if (FAILED_STATUSES.has(status)) return lookFailure("provider_failed", event.instanceId, resultIndex, "generation");
         if (!SUCCEEDED_STATUSES.has(status) && !outputUrl) continue;
-        if (!outputUrl || !isSafeHttpsUrl(outputUrl)) return lookFailure("invalid_output", event.instanceId, resultIndex);
+        if (!outputUrl || !isSafeHttpsUrl(outputUrl)) return lookFailure("invalid_output", event.instanceId, resultIndex, "result");
 
         const result = await step.do("store completed image", {
           retries: { limit: 2, delay: "3 seconds", backoff: "exponential" },
@@ -237,7 +248,7 @@ export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflow
         console.log(JSON.stringify({ event: "try_on_look_completed", resultIndex, workflowId: event.instanceId }));
         return { result, status: "succeeded" };
       }
-      return lookFailure("provider_timeout", event.instanceId, resultIndex);
+      return lookFailure("provider_timeout", event.instanceId, resultIndex, "poll");
     } catch (error) {
       console.error(JSON.stringify({
         error: error instanceof Error ? error.message : String(error),
@@ -245,7 +256,7 @@ export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflow
         resultIndex,
         workflowId: event.instanceId
       }));
-      return { reason: "internal_error", status: "failed" };
+      return lookFailure("internal_error", event.instanceId, resultIndex, "workflow");
     }
   }
 }
@@ -347,9 +358,9 @@ async function getTryOnJob(jobId: string, env: Env, cors: Headers): Promise<Resp
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
   const childJob = await getChildJobStatus(env, jobId);
   if (childJob.state === "processing") {
-    return json({ background: true, jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
+    return json({ background: true, errors: childJob.errors ?? [], jobId, pollAfterMs: 5000, status: "processing" }, 202, cors);
   }
-  if (childJob.state === "failed") return json({ error: childJob.message }, 502, cors);
+  if (childJob.state === "failed") return json({ error: childJob.message, errors: childJob.errors ?? [] }, 502, cors);
   if (childJob.state === "succeeded") return jobSucceededResponse(jobId, childJob.output, cors);
 
   let workflowStatus: InstanceStatus;
@@ -377,7 +388,7 @@ async function getTryOnResult(jobId: string, resultIndex: number, env: Env, cors
   if (!JOB_PATTERN.test(jobId)) return json({ error: "生成任务无效或已过期" }, 400, cors);
   const childJob = await getChildJobStatus(env, jobId);
   if (childJob.state === "processing") return json({ error: "结果尚未生成" }, 409, cors);
-  if (childJob.state === "failed") return json({ error: childJob.message }, 502, cors);
+  if (childJob.state === "failed") return json({ error: childJob.message, errors: childJob.errors ?? [] }, 502, cors);
   if (childJob.state === "succeeded") return storedResultResponse(childJob.output.results[resultIndex - 1], env, cors);
 
   let workflowStatus: InstanceStatus;
@@ -396,6 +407,7 @@ async function getTryOnResult(jobId: string, resultIndex: number, env: Env, cors
 function jobSucceededResponse(jobId: string, output: SucceededTryOnOutput, cors: Headers): Response {
   return json({
     failedCount: output.failedCount,
+    errors: output.errors ?? [],
     mode: output.mode,
     resultCount: output.results.length,
     results: output.results.map((_, index) => ({ url: `/api/try-on/jobs/${jobId}/results/${index + 1}` })),
@@ -424,7 +436,7 @@ async function mobPost(env: Env, body: Record<string, unknown>): Promise<MobResp
   if (!response.ok) {
     const detail = await readMobError(response);
     console.error(JSON.stringify({ event: "mob_ai_image_failed", message: detail, status: response.status }));
-    throw new MobRequestError(response.status, `Mob AI request failed: ${response.status}${detail ? ` ${detail}` : ""}`);
+    throw new MobRequestError(response.status, detail);
   }
   const value = await response.json<unknown>();
   if (!value || typeof value !== "object") throw new Error("Mob AI returned malformed JSON");
@@ -566,7 +578,7 @@ type TryOnMode = "layered" | "separate";
 type PoseMode = "original" | "studio" | "reference";
 type TryOnWorkflowParams = { extensions: string[]; generations: GenerationRequest[]; jobId: string; mode: TryOnMode; storagePrefix: string };
 type TryOnLookWorkflowParams = { generation: GenerationRequest; jobId: string; resultIndex: number };
-type SucceededTryOnOutput = { failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" };
+type SucceededTryOnOutput = { errors?: TryOnFailure[]; failedCount: number; mode: TryOnMode; results: StoredResult[]; status: "succeeded" };
 type TryOnWorkflowOutput =
   | SucceededTryOnOutput
   | { message: string; status: "failed" };
@@ -575,18 +587,22 @@ type TryOnBatchWorkflowOutput =
   | { message: string; status: "failed" };
 type TryOnLookWorkflowOutput =
   | { result: StoredResult; status: "succeeded" }
-  | { reason: LookFailureReason; status: "failed" };
+  | { reason: LookFailureReason; stage: LookFailureStage; status: "failed"; upstreamMessage?: string; upstreamStatus?: number };
 type JobManifest = { childCount: number; mode: TryOnMode; version: 2 };
 type ChildJobStatus =
   | { state: "not_found" }
-  | { state: "processing" }
-  | { message: string; state: "failed" }
+  | { errors?: TryOnFailure[]; state: "processing" }
+  | { errors?: TryOnFailure[]; message: string; state: "failed" }
   | { output: SucceededTryOnOutput; state: "succeeded" };
-type LookFailureReason = "gateway_auth" | "internal_error" | "invalid_output" | "provider_failed" | "provider_timeout";
+type LookFailureReason = "gateway_auth" | "gateway_error" | "internal_error" | "invalid_output" | "provider_failed" | "provider_timeout";
+type LookFailureStage = "generation" | "poll" | "result" | "submit" | "workflow";
+type TryOnFailure = { look: number; message: string; reason: LookFailureReason; stage: LookFailureStage; upstreamMessage?: string; upstreamStatus?: number };
+type MobSubmitResult =
+  | { kind: "submitted"; taskId: string }
+  | { kind: "failed"; upstreamMessage?: string; upstreamStatus: number };
 type MobPollResult =
   | { kind: "response"; response: MobResponse }
-  | { kind: "fatal" }
-  | { kind: "transient" };
+  | { kind: "failed"; reason: "gateway_auth" | "gateway_error"; upstreamMessage?: string; upstreamStatus?: number };
 type MobResponse = {
   status?: string;
   task?: { id?: string; providerStatus?: string; status?: string };
@@ -601,8 +617,8 @@ function normalizedMobStatus(response: MobResponse): string {
 }
 
 class MobRequestError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
+  constructor(readonly status: number, readonly detail: string) {
+    super(`Mob AI request failed: ${status}${detail ? ` ${detail}` : ""}`);
     this.name = "MobRequestError";
   }
 }
@@ -670,16 +686,20 @@ function lookPollDelay(pollIndex: number): "5 seconds" | "10 seconds" | "25 seco
   return "25 seconds";
 }
 
-function lookFailure(reason: LookFailureReason, workflowId: string, resultIndex: number): TryOnLookWorkflowOutput {
-  console.error(JSON.stringify({ event: "try_on_look_failed", reason, resultIndex, workflowId }));
-  return { reason, status: "failed" };
+function lookFailure(reason: LookFailureReason, workflowId: string, resultIndex: number, stage: LookFailureStage, upstreamStatus?: number, upstreamMessage?: string): TryOnLookWorkflowOutput {
+  const safeMessage = typeof upstreamMessage === "string" ? upstreamMessage.trim().slice(0, 300) : "";
+  console.error(JSON.stringify({ event: "try_on_look_failed", reason, resultIndex, stage, upstreamMessage: safeMessage || undefined, upstreamStatus, workflowId }));
+  return { reason, stage, status: "failed", ...(safeMessage ? { upstreamMessage: safeMessage } : {}), ...(upstreamStatus ? { upstreamStatus } : {}) };
 }
 
 function parseLookWorkflowOutput(value: unknown): TryOnLookWorkflowOutput | null {
   if (!value || typeof value !== "object" || !("status" in value)) return null;
   const output = value as Partial<TryOnLookWorkflowOutput>;
   if (output.status === "failed" && typeof output.reason === "string" && LOOK_FAILURE_REASONS.has(output.reason)) {
-    return { reason: output.reason as LookFailureReason, status: "failed" };
+    const stage = typeof output.stage === "string" && LOOK_FAILURE_STAGES.has(output.stage) ? output.stage as LookFailureStage : "workflow";
+    const upstreamStatus = Number.isInteger(output.upstreamStatus) && Number(output.upstreamStatus) >= 400 && Number(output.upstreamStatus) <= 599 ? Number(output.upstreamStatus) : undefined;
+    const upstreamMessage = typeof output.upstreamMessage === "string" ? output.upstreamMessage.trim().slice(0, 300) : "";
+    return { reason: output.reason as LookFailureReason, stage, status: "failed", ...(upstreamMessage ? { upstreamMessage } : {}), ...(upstreamStatus ? { upstreamStatus } : {}) };
   }
   if (output.status === "succeeded" && output.result && typeof output.result.resultKey === "string" && RESULT_KEY_PATTERN.test(output.result.resultKey) && typeof output.result.contentType === "string" && ACCEPTED_TYPES.has(output.result.contentType)) {
     return { result: output.result, status: "succeeded" };
@@ -708,28 +728,35 @@ async function getChildJobStatus(env: Env, jobId: string): Promise<ChildJobStatu
 
   if (!observed.length) return { state: "not_found" };
   if (manifest && observed.length !== manifest.childCount) return { state: "processing" };
-  if (observed.some((status) => ["queued", "running", "waiting", "waitingForPause", "paused"].includes(status.status))) {
-    return { state: "processing" };
-  }
 
   const results: StoredResult[] = [];
+  const errors: TryOnFailure[] = [];
   let failedCount = 0;
-  for (const status of observed) {
+  let stillProcessing = false;
+  for (const [index, status] of observed.entries()) {
+    if (["queued", "running", "waiting", "waitingForPause", "paused"].includes(status.status)) {
+      stillProcessing = true;
+      continue;
+    }
     if (status.status !== "complete") {
       failedCount += 1;
+      errors.push(publicLookFailure(index + 1, { reason: "internal_error", stage: "workflow", status: "failed" }));
       continue;
     }
     const output = parseLookWorkflowOutput(status.output);
     if (!output || output.status === "failed") {
       failedCount += 1;
+      errors.push(publicLookFailure(index + 1, output?.status === "failed" ? output : { reason: "internal_error", stage: "workflow", status: "failed" }));
       continue;
     }
     results.push(output.result);
   }
 
-  if (!results.length) return { message: "这组图片没能生成结果，请换用更清晰、无遮挡的照片再试", state: "failed" };
+  if (stillProcessing) return { errors, state: "processing" };
+  if (!results.length) return { errors, message: errors.map((error) => error.message).join(" ") || "The background task failed before producing a result.", state: "failed" };
   return {
     output: {
+      errors,
       failedCount,
       mode: manifest?.mode ?? (observed.length > 1 ? "separate" : "layered"),
       results,
@@ -737,6 +764,22 @@ async function getChildJobStatus(env: Env, jobId: string): Promise<ChildJobStatu
     },
     state: "succeeded"
   };
+}
+
+function publicLookFailure(look: number, output: Extract<TryOnLookWorkflowOutput, { status: "failed" }>): TryOnFailure {
+  const status = output.upstreamStatus ? ` HTTP ${output.upstreamStatus}.` : "";
+  const detail = output.upstreamMessage ? ` Mob AI: ${output.upstreamMessage}` : "";
+  const messages: Record<LookFailureReason, string> = {
+    gateway_auth: `Look ${look}: Mob AI authentication failed during ${output.stage}.${status}${detail}`,
+    gateway_error: output.stage === "submit"
+      ? `Look ${look}: Mob AI submission failed.${status}${detail} Generation did not start.`
+      : `Look ${look}: Mob AI status check failed.${status}${detail}`,
+    internal_error: `Look ${look}: The background workflow failed before a result was saved.`,
+    invalid_output: `Look ${look}: Mob AI returned an invalid image result.`,
+    provider_failed: `Look ${look}: Mob AI reported that generation failed.`,
+    provider_timeout: `Look ${look}: Mob AI did not finish before the status window ended.${status}`
+  };
+  return { look, message: messages[output.reason], reason: output.reason, stage: output.stage, ...(output.upstreamMessage ? { upstreamMessage: output.upstreamMessage } : {}), ...(output.upstreamStatus ? { upstreamStatus: output.upstreamStatus } : {}) };
 }
 
 async function getBatchFailureOrProcessing(env: Env, jobId: string): Promise<ChildJobStatus> {
