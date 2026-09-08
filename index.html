@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=10">
+    <link rel="stylesheet" href="styles.css?v=11">
   </head>
   <body>
     <header class="site-header">
@@ -164,7 +164,10 @@
         <div class="result-panel" id="resultPanel">
           <div class="result-topline">
             <span>03 · Result</span>
-            <span id="resultMeta">Awaiting input</span>
+            <div class="result-status">
+              <span id="resultMeta">Awaiting input</span>
+              <button class="release-task-button" id="releaseTaskButton" type="button" hidden>Start new fitting</button>
+            </div>
           </div>
 
           <div class="result-stage" id="resultStage">
@@ -188,7 +191,6 @@
                 <code id="activeTaskReference">Task pending</code>
                 <button id="copyTaskButton" type="button">Copy ID</button>
               </div>
-              <button class="release-task-button" id="releaseTaskButton" type="button">Start new fitting</button>
               <small class="release-task-note">Releases this screen only. The background task may still finish.</small>
             </div>
 
@@ -236,6 +238,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js?v=12" defer></script>
+    <script src="app.js?v=13" defer></script>
   </body>
 </html>

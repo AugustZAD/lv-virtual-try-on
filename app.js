@@ -293,6 +293,7 @@ function showActiveTask(jobId) {
   elements.taskReference.dataset.jobId = jobId;
   elements.taskReference.textContent = `Task · ${jobId.slice(-8).toUpperCase()}`;
   elements.copyTask.textContent = "Copy ID";
+  elements.releaseTask.hidden = false;
 }
 
 function stopProgress(complete = false) {
@@ -446,7 +447,10 @@ async function waitForBackgroundJob(jobId, initialPollAfterMs) {
 }
 
 function clearPendingJob(jobId) {
-  if (activeJobId === jobId) activeJobId = "";
+  if (activeJobId === jobId) {
+    activeJobId = "";
+    elements.releaseTask.hidden = true;
+  }
   if (window.localStorage.getItem(PENDING_JOB_KEY) === jobId) window.localStorage.removeItem(PENDING_JOB_KEY);
 }
 
