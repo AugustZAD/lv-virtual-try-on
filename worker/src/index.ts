@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { AwsClient } from "aws4fetch";
+import { PrunaError, prunaDetail, prunaImage, prunaInput, prunaRequest, trustedPrunaUrl } from "./pruna";
 
 const MOB_AI_GENERATIONS_URL = "https://ai.mob-ai.cn/api/v1/generations";
 const MOB_AI_IMAGE_MODEL = "image-gpt";
@@ -31,7 +32,7 @@ export default {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return handleOptions(request, env);
     if (request.method === "GET" && url.pathname === "/") {
-      return json({ background: "cloudflare-workflows", gateway: "mob-ai", model: MOB_AI_IMAGE_MODEL, service: "lv-virtual-try-on", status: "ok" }, 200);
+      return json({ background: "cloudflare-workflows", gateway: "pruna", model: "p-image-try-on", service: "lv-virtual-try-on", status: "ok" }, 200);
     }
 
     const resultMatch = request.method === "GET"
@@ -187,6 +188,7 @@ export class TryOnBatchWorkflow extends WorkflowEntrypoint<Env, TryOnWorkflowPar
 export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflowParams> {
   async run(event: WorkflowEvent<TryOnLookWorkflowParams>, step: WorkflowStep): Promise<TryOnLookWorkflowOutput> {
     const { generation, jobId, resultIndex } = event.payload;
+    if (generation.provider === "pruna") return runPrunaLook(this.env, generation, jobId, resultIndex, event.instanceId, step);
     try {
       // Do not retry submission: an ambiguous network failure must not create a duplicate paid task.
       const submission = await step.do("submit Mob AI generation", {
@@ -261,6 +263,42 @@ export class TryOnLookWorkflow extends WorkflowEntrypoint<Env, TryOnLookWorkflow
   }
 }
 
+function prunaKey(env: Env): string { return env.PRUNA_API_KEY || ""; }
+
+function buildPrunaPrompt(direction: string): string {
+  return `Use only the supplied garments. Preserve the source person's face, identity, hairstyle, body proportions, pose, original shoes, accessories and background. Reproduce garment colors, patterns, lettering and construction faithfully. Do not transfer the garment model's shoes, accessories or background.${direction ? ` Styling direction: ${direction}` : ""}`;
+}
+
+async function runPrunaLook(env: Env, generation: GenerationRequest, jobId: string, resultIndex: number, workflowId: string, step: WorkflowStep): Promise<TryOnLookWorkflowOutput> {
+  let stage: LookFailureStage = "submit";
+  const failure = (reason: LookFailureReason, status?: number, detail?: string): TryOnLookWorkflowOutput => ({ ...lookFailure(reason, workflowId, resultIndex, stage, status, detail), provider: "pruna" });
+  try {
+    // Never retry paid submissions or silently switch to another paid provider.
+    const submitted = await step.do("submit Pruna fitting", { retries: {limit: 0, delay: "1 second", backoff: "constant"}, timeout: "1 minute" }, () => prunaRequest(prunaKey(env), prunaInput(generation.references, generation.prompt, Boolean(generation.hasPose))));
+    if (!submitted.id || typeof submitted.id !== "string" || submitted.id.length > 300) throw new Error("Pruna submit response omitted prediction ID");
+    stage = "poll";
+    for (let round = 0; round < MAX_LOOK_POLLS; round += 1) {
+      await step.sleep(`wait for Pruna round ${round + 1}`, round < 12 ? "2 seconds" : lookPollDelay(round));
+      const response = await step.do(`check Pruna fitting ${round + 1}`, { retries: {limit: 0, delay: "1 second", backoff: "constant"}, timeout: "1 minute" }, () => prunaRequest(prunaKey(env), submitted.id!));
+      if (response.status === "failed" || response.status === "canceled" || response.status === "cancelled") {
+        stage = "generation";
+        return failure("provider_failed", undefined, prunaDetail(response, prunaKey(env)));
+      }
+      if (response.status !== "succeeded") continue;
+      stage = "result";
+      if (!response.generation_url || !trustedPrunaUrl(response.generation_url)) return failure("invalid_output");
+      const result = await step.do("store Pruna completed image", {retries: {limit: 0, delay: "1 second", backoff: "constant"}, timeout: "2 minutes"}, () => storeCompletedImage(env, jobId, resultIndex, response.generation_url!, "pruna"));
+      console.log(JSON.stringify({event: "try_on_look_completed", provider: "pruna", resultIndex, workflowId}));
+      return {result, status: "succeeded"};
+    }
+    return failure("provider_timeout");
+  } catch (error) {
+    if (error instanceof PrunaError) return failure(error.status === 401 || error.status === 403 ? "gateway_auth" : "gateway_error", error.status, error.detail);
+    const detail = error instanceof Error ? error.message.replaceAll(prunaKey(env), "[redacted]").slice(0,300) : "Pruna fitting failed";
+    return failure("internal_error", undefined, detail);
+  }
+}
+
 async function createTryOn(request: Request, env: Env, cors: Headers): Promise<Response> {
   const contentType = request.headers.get("Content-Type") || "";
   if (!contentType.startsWith("multipart/form-data")) return json({ error: "请上传真人照和服装图片" }, 415, cors);
@@ -288,6 +326,11 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
   const mode: TryOnMode = MODE_VALUES.has(modeInput) ? modeInput as TryOnMode : "separate";
   const poseInput = stringValue(input.get("poseMode"));
   const poseMode: PoseMode = POSE_VALUES.has(poseInput) ? poseInput as PoseMode : "original";
+  const providerInput = stringValue(input.get("provider"));
+  if (providerInput && providerInput !== "pruna" && providerInput !== "mob-ai") return json({ error: "Unknown fitting model" }, 400, cors);
+  const provider = providerInput === "mob-ai" ? "mob-ai" : "pruna";
+  if (provider === "pruna" && !prunaKey(env)) return json({ error: "Pruna is not configured" }, 503, cors);
+  if (provider === "pruna" && poseMode === "studio") return json({ error: "Studio pose requires Detail · GPT Image. Select Original or Reference for Fast · Pruna." }, 400, cors);
   const formJobId = stringValue(input.get("jobId"));
 
   if (consent !== "true") return json({ error: "请先确认已获得照片中人物的许可" }, 400, cors);
@@ -325,10 +368,11 @@ async function createTryOn(request: Request, env: Env, cors: Headers): Promise<R
     const poseReferenceItem = poseMode === "reference" ? references[garmentFiles.length + 1] : null;
     const generations: GenerationRequest[] = mode === "separate"
       ? garmentFiles.map((_, index) => ({
-          prompt: buildSeparatePrompt(index + 1, garmentFiles.length, direction, poseMode),
+          provider, hasPose: Boolean(poseReferenceItem),
+          prompt: provider === "pruna" ? buildPrunaPrompt(direction) : buildSeparatePrompt(index + 1, garmentFiles.length, direction, poseMode),
           references: [references[0], references[index + 1], ...(poseReferenceItem ? [poseReferenceItem] : [])]
         }))
-      : [{ prompt: buildLayeredPrompt(garmentFiles.length, direction, poseMode), references }];
+      : [{ provider, hasPose: Boolean(poseReferenceItem), prompt: provider === "pruna" ? buildPrunaPrompt(direction) : buildLayeredPrompt(garmentFiles.length, direction, poseMode), references }];
     await putJobManifest(env, jobId, { childCount: generations.length, mode, version: 2 });
     await env.TRY_ON_BATCH_WORKFLOW.create({
       id: jobId,
@@ -510,14 +554,15 @@ function manifestKey(jobId: string): string {
   return `${RESULT_PREFIX}/${jobId}.json`;
 }
 
-async function storeCompletedImage(env: Env, jobId: string, resultIndex: number, outputUrl: string): Promise<StoredResult> {
+async function storeCompletedImage(env: Env, jobId: string, resultIndex: number, outputUrl: string, provider: "mob-ai" | "pruna" = "mob-ai"): Promise<StoredResult> {
   if (!JOB_PATTERN.test(jobId)) throw new Error("Invalid workflow job id");
-  const output = await fetchTrustedImage(outputUrl);
-  if (!output.ok) throw new Error(`Mob AI image download failed: ${output.status}`);
+  const output = provider === "pruna" ? await prunaImage(prunaKey(env), outputUrl) : await fetchTrustedImage(outputUrl);
+  const providerLabel = provider === "pruna" ? "Pruna" : "Mob AI";
+  if (!output.ok) throw new Error(`${providerLabel} image download failed: ${output.status}`);
   const outputLength = Number(output.headers.get("Content-Length"));
-  if (Number.isFinite(outputLength) && outputLength > MAX_RESULT_BYTES) throw new Error("Mob AI output exceeded the size limit");
+  if (Number.isFinite(outputLength) && outputLength > MAX_RESULT_BYTES) throw new Error(`${providerLabel} output exceeded the size limit`);
   const contentType = (output.headers.get("Content-Type") || "image/png").split(";", 1)[0].trim().toLowerCase();
-  if (!ACCEPTED_TYPES.has(contentType)) throw new Error("Mob AI output was not a supported image");
+  if (!ACCEPTED_TYPES.has(contentType)) throw new Error(`${providerLabel} output was not a supported image`);
   const outputBytes = await readBodyWithLimit(output, MAX_RESULT_BYTES);
   const resultKey = `${RESULT_PREFIX}/${jobId}-${resultIndex}.${imageExtension(contentType)}`;
   const response = await storageClient(env).fetch(storageUrl(env, resultKey), {
@@ -572,7 +617,7 @@ function poseInstruction(mode: PoseMode, referenceNumber: number): string {
 }
 
 type ImageReference = { type: "image"; url: string };
-type GenerationRequest = { prompt: string; references: ImageReference[] };
+type GenerationRequest = { prompt: string; references: ImageReference[]; provider?: "mob-ai" | "pruna"; hasPose?: boolean };
 type StoredResult = { contentType: string; resultKey: string };
 type TryOnMode = "layered" | "separate";
 type PoseMode = "original" | "studio" | "reference";
@@ -587,7 +632,7 @@ type TryOnBatchWorkflowOutput =
   | { message: string; status: "failed" };
 type TryOnLookWorkflowOutput =
   | { result: StoredResult; status: "succeeded" }
-  | { reason: LookFailureReason; stage: LookFailureStage; status: "failed"; upstreamMessage?: string; upstreamStatus?: number };
+  | { reason: LookFailureReason; stage: LookFailureStage; status: "failed"; upstreamMessage?: string; upstreamStatus?: number; provider?: "pruna" };
 type JobManifest = { childCount: number; mode: TryOnMode; version: 2 };
 type ChildJobStatus =
   | { state: "not_found" }
@@ -686,7 +731,7 @@ function lookPollDelay(pollIndex: number): "5 seconds" | "10 seconds" | "25 seco
   return "25 seconds";
 }
 
-function lookFailure(reason: LookFailureReason, workflowId: string, resultIndex: number, stage: LookFailureStage, upstreamStatus?: number, upstreamMessage?: string): TryOnLookWorkflowOutput {
+function lookFailure(reason: LookFailureReason, workflowId: string, resultIndex: number, stage: LookFailureStage, upstreamStatus?: number, upstreamMessage?: string): Extract<TryOnLookWorkflowOutput, {status: "failed"}> {
   const safeMessage = typeof upstreamMessage === "string" ? upstreamMessage.trim().slice(0, 300) : "";
   console.error(JSON.stringify({ event: "try_on_look_failed", reason, resultIndex, stage, upstreamMessage: safeMessage || undefined, upstreamStatus, workflowId }));
   return { reason, stage, status: "failed", ...(safeMessage ? { upstreamMessage: safeMessage } : {}), ...(upstreamStatus ? { upstreamStatus } : {}) };
@@ -699,7 +744,7 @@ function parseLookWorkflowOutput(value: unknown): TryOnLookWorkflowOutput | null
     const stage = typeof output.stage === "string" && LOOK_FAILURE_STAGES.has(output.stage) ? output.stage as LookFailureStage : "workflow";
     const upstreamStatus = Number.isInteger(output.upstreamStatus) && Number(output.upstreamStatus) >= 400 && Number(output.upstreamStatus) <= 599 ? Number(output.upstreamStatus) : undefined;
     const upstreamMessage = typeof output.upstreamMessage === "string" ? output.upstreamMessage.trim().slice(0, 300) : "";
-    return { reason: output.reason as LookFailureReason, stage, status: "failed", ...(upstreamMessage ? { upstreamMessage } : {}), ...(upstreamStatus ? { upstreamStatus } : {}) };
+    return { reason: output.reason as LookFailureReason, stage, status: "failed", ...(output.provider === "pruna" ? {provider: "pruna" as const} : {}), ...(upstreamMessage ? { upstreamMessage } : {}), ...(upstreamStatus ? { upstreamStatus } : {}) };
   }
   if (output.status === "succeeded" && output.result && typeof output.result.resultKey === "string" && RESULT_KEY_PATTERN.test(output.result.resultKey) && typeof output.result.contentType === "string" && ACCEPTED_TYPES.has(output.result.contentType)) {
     return { result: output.result, status: "succeeded" };
@@ -779,7 +824,8 @@ function publicLookFailure(look: number, output: Extract<TryOnLookWorkflowOutput
     provider_failed: `Look ${look}: Mob AI reported that generation failed.`,
     provider_timeout: `Look ${look}: Mob AI did not finish before the status window ended.${status}`
   };
-  return { look, message: messages[output.reason], reason: output.reason, stage: output.stage, ...(output.upstreamMessage ? { upstreamMessage: output.upstreamMessage } : {}), ...(output.upstreamStatus ? { upstreamStatus: output.upstreamStatus } : {}) };
+  const message = output.provider === "pruna" ? `Look ${look}: Pruna ${output.stage} failed.${status}${output.upstreamMessage ? ` ${output.upstreamMessage}` : ` ${messages[output.reason].replaceAll("Mob AI", "Pruna")}`}` : messages[output.reason];
+  return { look, message, reason: output.reason, stage: output.stage, ...(output.upstreamMessage ? { upstreamMessage: output.upstreamMessage } : {}), ...(output.upstreamStatus ? { upstreamStatus: output.upstreamStatus } : {}) };
 }
 
 async function getBatchFailureOrProcessing(env: Env, jobId: string): Promise<ChildJobStatus> {

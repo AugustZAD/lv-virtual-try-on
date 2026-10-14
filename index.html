@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f4f0e9">
-    <meta name="description" content="A simple GPT Image 2 virtual fitting room.">
+    <meta name="description" content="Fast virtual fitting with Pruna, with GPT Image for detailed results.">
     <title>LV Fitting Room</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=11">
+    <link rel="stylesheet" href="styles.css?v=12">
   </head>
   <body>
     <header class="site-header">
@@ -20,7 +20,7 @@
       </a>
       <div class="model-pill" aria-label="当前模型">
         <span class="status-dot" aria-hidden="true"></span>
-        GPT Image 2
+        <span id="modelLabel">Pruna Try-On</span>
       </div>
     </header>
 
@@ -97,6 +97,15 @@
             </div>
           </fieldset>
 
+          <label class="model-field">
+            <span>Model</span>
+            <select id="providerInput">
+              <option value="pruna" selected>Fast · Pruna</option>
+              <option value="mob-ai">Detail · GPT Image</option>
+            </select>
+            <small id="modelHint">Quick fitting · keeps your original pose.</small>
+          </label>
+
           <fieldset class="pose-fieldset">
             <legend>Pose</legend>
             <div class="pose-options">
@@ -140,7 +149,7 @@
 
           <div class="format-note standalone-format">
             <span>Format</span>
-            <strong>Portrait · 1024 × 1536</strong>
+            <strong id="formatLabel">Original dimensions</strong>
           </div>
 
           <label class="consent-row">
@@ -238,6 +247,6 @@
       <span>Personal styling, reimagined.</span>
     </footer>
 
-    <script src="app.js?v=13" defer></script>
+    <script src="app.js?v=14" defer></script>
   </body>
 </html>

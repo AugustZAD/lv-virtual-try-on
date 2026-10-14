@@ -10,6 +10,10 @@ const JOB_ID_PATTERN = /^job_[a-f0-9]{32}$/;
 
 const elements = {
   consent: document.querySelector("#consentInput"),
+  provider: document.querySelector("#providerInput"),
+  modelLabel: document.querySelector("#modelLabel"),
+  modelHint: document.querySelector("#modelHint"),
+  formatLabel: document.querySelector("#formatLabel"),
   copyTask: document.querySelector("#copyTaskButton"),
   direction: document.querySelector("#directionInput"),
   download: document.querySelector("#downloadButton"),
@@ -120,8 +124,17 @@ function setPoseReference(file) {
 }
 
 function syncPoseMode() {
+  if (selectedPoseMode() === "studio" && elements.provider.value === "pruna") elements.provider.value = "mob-ai";
+  syncProvider();
   elements.poseReferencePanel.hidden = selectedPoseMode() !== "reference";
   updateButton();
+}
+
+function syncProvider() {
+  const fast = elements.provider.value === "pruna";
+  elements.modelLabel.textContent = fast ? "Pruna Try-On" : "GPT Image 2";
+  elements.formatLabel.textContent = fast ? "Original dimensions" : "Portrait · 1024 × 1536";
+  elements.modelHint.textContent = fast ? "Quick fitting · Original or Reference pose." : "More detail · longer generation time. Studio uses this model.";
 }
 
 function formReady() {
@@ -333,6 +346,7 @@ async function generateTryOn() {
   body.append("person", personFile, personFile.name);
   garmentFiles.forEach((file) => body.append("garments", file, file.name));
   body.append("consent", "true");
+  body.append("provider", elements.provider.value);
   body.append("direction", elements.direction.value.trim());
   body.append("mode", document.querySelector('input[name="tryOnMode"]:checked')?.value || "separate");
   body.append("poseMode", selectedPoseMode());
@@ -510,6 +524,10 @@ elements.poseInput.addEventListener("change", (event) => {
   event.target.value = "";
 });
 document.querySelectorAll('input[name="poseMode"]').forEach((input) => input.addEventListener("change", syncPoseMode));
+elements.provider.addEventListener("change", () => {
+  if (elements.provider.value === "pruna" && selectedPoseMode() === "studio") document.querySelector('input[name="poseMode"][value="original"]').checked = true;
+  syncPoseMode();
+});
 elements.consent.addEventListener("change", updateButton);
 elements.generate.addEventListener("click", generateTryOn);
 elements.copyTask.addEventListener("click", async () => {
